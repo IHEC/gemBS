@@ -21,7 +21,7 @@ Download
 
 Use ``git clone --recursive`` to retrieve the complete source code including the code from external projects such as ``bs_call`` and ``gem3-mapper``.
 
-    git clone --recursive https://github.com/heathsc/gemBS.git
+    git clone --recursive https://github.com/IHEC/gemBS.git
 
 ------------
 Installation
@@ -45,7 +45,7 @@ can install everything required with the followiwg commands:
 
 2) Download the gemBS distribution if you haven't already done so:
 
-    ``git clone --recursive https://github.com/heathsc/gemBS.git``
+    ``git clone --recursive https://github.com/IHEC/gemBS.git``
 
 3) Use python install command:
 
