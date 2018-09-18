@@ -125,9 +125,16 @@ class database(sqlite3.Connection):
         c.execute("REPLACE INTO indexing VALUES (?, 'reference', 1)",(ref,))
         cdef =config['DEFAULT']
         index = cdef.get('index', None)
+        nonbs_index = cdef.get('nonbs_index', None)
+        nonbs_flag = cdef.get('nonbs_flag', False)
         csizes = cdef.get('contig_sizes', None)
         index_dir = cdef.get('index_dir', None)
         dbSNP_idx = cdef.get('dbsnp_index', None)
+        if dbSNP_idx == None:
+            dbSNP_files = cdef.get('dbsnp_files', None)
+            if dbSNP_files != None and index_dir != None:
+                dbSNP_idx = os.path.join(index_dir,'dbSNP_gemBS.idx')
+                config['DEFAULT']['dbsnp_index'] = dbSNP_idx
         dbSNP_ok = 0
         if dbSNP_idx != None and os.path.exists(dbSNP_idx): dbSNP_ok = 1
         reference_basename = cdef.get('reference_basename', None)
@@ -158,15 +165,31 @@ class database(sqlite3.Connection):
             index_ok = 1 if os.path.exists(index) else 0
         else:
             try:
-                index = _prepare_index_parameter(index)
+                index = database._prepare_index_parameter(index)
                 index_ok = 1
             except IOError:
                 index_ok = 0
+        if nonbs_index == None:
+            if nonbs_flag:
+                nonbs_index = os.path.join(index_dir, reference_basename) + '.gem'
+                nonbs_index_ok = 1 if os.path.exists(index) else 0
+        else:
+            try:
+                nonbs_index = database._prepare_index_parameter(nonbs_index, nonbs = True)
+                nonbs_index_ok = 1
+            except IOError:
+                nonbs_index_ok = 0
         csizes_ok = 1 if os.path.exists(csizes) else 0
         c.execute("REPLACE INTO indexing VALUES (?, 'index', ?)",(index, index_ok))
         c.execute("REPLACE INTO indexing VALUES (?, 'contig_sizes', ?)",(csizes,csizes_ok))
+        if nonbs_index != None:
+            c.execute("REPLACE INTO indexing VALUES (?, 'nonbs_index', ?)",(nonbs_index,nonbs_index_ok))
+        else:
+            c.execute("DELETE FROM indexing WHERE type == 'nonbs_index'")
         if dbSNP_idx != None:
             c.execute("REPLACE INTO indexing VALUES (?, 'dbsnp_idx', ?)",(dbSNP_idx,dbSNP_ok))
+        else:
+            c.execute("DELETE FROM indexing WHERE type == 'dbsnp_idx'")
         self.commit()
 
     def check_mapping(self, sync = False):
@@ -273,16 +296,14 @@ class database(sqlite3.Connection):
         
         # Make list of contig pools already described in JSON file
         rebuild = 0;
-        for ctg, pool in js.pools.items():
-            if ctg not in contig_size:
-                rebuild |= 1
-            else:
-                ctg_flag[ctg][0] |= 1
-                ctg_flag[ctg][1] = pool
-            if not pool in ctg_pools:
-                ctg_pools[pool] = [[ctg], False, {}]
-            else:
-                ctg_pools[pool][0].append(ctg)
+        for pool, ctglist in js.contigs.items():
+            for ctg in ctglist:
+                if ctg not in contig_size:
+                    rebuild |= 1
+                else:
+                    ctg_flag[ctg][0] |= 1
+                    ctg_flag[ctg][1] = pool
+            ctg_pools[pool] = [ctglist, False, {}]
             
         # And make list of contigs already completed in table
         if not sync:
@@ -309,7 +330,7 @@ class database(sqlite3.Connection):
             # in sync (which should mean that the db has been altered outside of
             # gemBS) and we can not be confident in the makeup of the pools
             logging.gemBS.gt("db tables have been altered and do not correspond - rebuilding")
-            print(rebuild)
+#            print(rebuild)
             for ctg in contig_size:
                 ctg_flag[ctg] = [0, None]
         else:
@@ -424,6 +445,7 @@ class database(sqlite3.Connection):
                 if os.path.isfile(sample_cpg + '_non_cpg.txt.gz.tbi'): st |= 4
                 if os.path.isfile(sample_cpg + '_chh.bb'): st |= 16
                 if os.path.isfile(sample_cpg + '.bw'): st |= 64
+                if os.path.isfile(sample_cpg + '_snps.txt.gz.tbi'): st |= 256
                 old = (old[0], old[1], st)
             extract_tab[sample_cpg] = (sample_cpg, bc, old[2])
             if old != extract_tab[sample_cpg]:
@@ -443,7 +465,7 @@ class database(sqlite3.Connection):
             self.commit()
 
     @staticmethod
-    def _prepare_index_parameter(index):
+    def _prepare_index_parameter(index, nonbs = False):
         """Prepares the index file and checks that the index
         exists. The function throws a IOError if the index file
         can not be found.
@@ -460,7 +482,8 @@ class database(sqlite3.Connection):
         file_name = index
 
         if not os.path.exists(file_name):
-            if not index.endswith('.BS.gem') and os.path.exists(index + '.BS.gem'):
+            
+            if not nonbs and not index.endswith('.BS.gem') and os.path.exists(index + '.BS.gem'):
                 index += '.BS.gem'
             elif not index.endswith(".gem") and os.path.exists(index + '.gem'):
                 index += '.gem'

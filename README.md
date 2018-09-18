@@ -49,7 +49,30 @@ can install everything required with the followiwg commands:
 
 3) Use python install command:
 
+To install to the standard system location (i.e., so that all users
+can use gemBS):
+
+    ``python3 setup.py install``
+
+To install to the user's home directory:
+
     ``python3 setup.py install --user``
+
+Note that gemBS requires that GSL (GNU scientific library) is
+installed prior to the installation of gemBS.  If GSL has been
+installed on your system to the standard system location then the
+above procedure should work without modification.  If, however, GSL
+has been installed to a non-standard location then then --gsl-path
+option to install can be used.  Fo example, if the installation prefix
+for GSL is /opt/local (so the libraries are in /opt/local/lib and the
+include directory gsl is in /opt/local/include) then the following
+install command should be used:
+
+    ``python3 setup.py install --gsl-path=/opt/local``
+
+or
+
+    ``python3 setup.py install --gsl-path=/opt/local --user``
 
 -----------------------
 Check your installation
@@ -69,6 +92,19 @@ Documentation can be found at
 ----------
 Changelog:
 ----------
+    3.2.1 Fix undeclared variable bugs and missing --ignore-deps option in merge-bcfs
+    3.2.1 Add default for dbSNP_index if dbSNP_files is set
+    3.2.1 Add gsl-path install option
+    3.2.0 Make new release
+    3.1.0 Make installation process more modular.  Allow for sub-installs
+    3.1.0 Add support for reading config from ${index_dir}/gemBS.json if it exists
+    3.1.0 Add --reference-bias option to mextr and gemBS extract
+    3.1.0 Add support for non-bisulfite mapping of individual datasets
+    3.1.0 Allow white space in variable values
+    3.1.0 Allow fallback to gzip if pigz not present
+    3.1.0 Add --dry-run, --json, --ignore-db and --ignore-dep to extract command
+    3.1.0 Add --ignore-dep option to call and merge-bcfs commands
+    3.1.0 Add SNP extraction function to extract command
     3.0 Make v3.0 release
     3.0 Merge with master branch.
     3.0 Bump samtools sort memory limit to 2G

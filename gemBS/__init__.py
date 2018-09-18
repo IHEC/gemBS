@@ -17,6 +17,8 @@ import json
 import gzip
 import pkg_resources
 import glob
+import distutils
+import distutils.util
 
 from .utils import run_tools, CommandException, try_get_exclusive
 from .parser import gembsConfigParse
@@ -36,9 +38,6 @@ class execs_dict(dict):
         # check if there is an environment variable set
         # to specify the path to the GEM executables
         
-        #src/gemBSbinaries/readNameClean
-         
-          
         base_dir = os.getenv("GEM_BS_PATH", None)
         if base_dir is not None:
             file = os.path.join(base_dir, item)
@@ -61,14 +60,27 @@ class execs_dict(dict):
             try:
                 base = os.path.split(os.path.abspath(sys.argv[0]))[0]
                 binary = os.path.join(base,item)
-                if os.path.exists(binary):
-                    logging.debug("Using bundled binary : %s" % binary)
+                if os.path.isfile(binary) and os.access(binary, os.X_OK):
+                    logging.debug("Using bundled binary: %s" % binary)
                     return binary
             except Exception:
                 pass
 
-        logging.debug("Using binary from PATH: %s" % item)
-        return dict.__getitem__(self, item)
+        # try in system PATH
+        fpath, fname = os.path.split(item)
+        if fpath:
+            if os.path.isfile(item) and os.access(item, os.X_OK):
+                return item
+        else:
+            for path in os.environ["PATH"].split(os.pathsep):
+                binary = os.path.join(path, item)
+                if os.path.isfile(binary) and os.access(binary, os.X_OK):
+                    logging.debug("Using binary from PATH: %s" % binary)
+                    return binary
+        if dict.__contains__(self, item):
+            return dict.__getitem__(self, item)
+        
+        return None
 
 ## paths to the executables
 executables = execs_dict({
@@ -100,6 +112,8 @@ class Fli:
         self.file = None
         self.centre = None
         self.platform = None
+        self.bisulfite = True
+        
     def getFli(self):
         #Get FLI (flowcell lane index)
         return self.fli
@@ -123,7 +137,7 @@ class JSONdata:
         try:
             conf = jsconfig['config']
             defaults = conf['DEFAULT']
-            for sect in ['mapping', 'calling', 'extract', 'report', 'index', 'DEFAULT']:
+            for sect in ['DEFAULT', 'mapping', 'calling', 'extract', 'report', 'index']:
                 self.config[sect] = {}
                 if sect in conf:
                     for key,val in conf[sect].items():
@@ -164,6 +178,8 @@ class JSONdata:
                     fliCommands.centre = value
                 elif key == "platform":
                     fliCommands.platform = value
+                elif key == "bisulfite":
+                    fliCommands.bisulfite = json.loads(str(value).lower())
 
                 self.sampleData[fli] = fliCommands
 
@@ -195,13 +211,6 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
     cpath = None
     inputs_path = None
 
-    if no_db:
-        js = 'gemBS.json'
-    else:
-        js = '.gemBS/gemBS.json'
-    if os.path.exists(js):
-        os.remove(js)
-        
     if configFile is not None:
         config = gembsConfigParse()
         config.read(configFile)
@@ -221,10 +230,42 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
         elif dbfile == None:
             dbfile = def_dict.get('gembs_dbfile', '.gemBS/gemBS.db')
         config_dict['DEFAULT']['gembs_dbfile'] = dbfile
+        if 'index_dir' in config_dict['DEFAULT']:
+            ixdir = config_dict['DEFAULT']['index_dir']
+            conf = os.path.join(ixdir, 'gemBS.json')
+            path_vars = (
+                'tmp_dir', 'bam_dir', 'sequence_dir', 'index', 'reference', 'reference_basename', 'extra_references', 'nonbs_index', 'contig_sizes', 'dbsnp_files', 'dbsnp_index',
+                'bcf_dir', 'extract_dir', 'report_dir'
+            )
+            if os.path.exists(conf):
+                with open(conf, 'r') as fileJson:
+                    js = json.load(fileJson)
+                    defaults = config_dict['DEFAULT']
+                    for sect in ['DEFAULT', 'mapping', 'calling', 'extract', 'report', 'index']:
+                        if not sect in config_dict:
+                            config_dict[src] = {}
+                        if sect in js:
+                            for key,val in js[sect].items():
+                                if not key in config_dict[sect]:
+                                    if key in path_vars:
+                                        val = os.path.join(ixdir, val)
+                                    config_dict[sect][key] = val
+                        if sect != 'DEFAULT' and 'DEFAULT' in js:
+                            for key,val in js['DEFAULT'].items():
+                                if not key in config_dict[sect]:
+                                    if key in path_vars:
+                                        val = os.path.join(ixdir, val)
+                                    config_dict[sect][key] = val
+            
         if not 'reference' in config_dict['DEFAULT']:
             raise ValueError("No value for 'reference' given in main section of configuration file {}".format(configFile))
         if not os.path.exists(config_dict['DEFAULT']['reference']):
             raise CommandException("Reference file '{}' does not exist".format(config_dict['DEFAULT']['reference']))
+        if 'dbsnp_files' in config_dict['DEFAULT'] and not 'dbsnp_index' in config_dict['DEFAULT']:
+            dbsnp_index = os.path.join(ixdir, 'dbSNP_gemBS.idx')
+            config_dict['DEFAULT']['dbsnp_index'] = dbsnp_index
+            config_dict['index']['dbsnp_index'] = dbsnp_index
+            
         ex_fasta = config_dict['DEFAULT'].get('extra_references')
         if ex_fasta:
             if not isinstance(ex_fasta, list):
@@ -269,10 +310,8 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
         else:
             jsonOutput = 'gemBS.json'
 
-    if os.path.exists(jsonOutput):
-        os.remove(jsonOutput)
-
     generalDictionary['sampleData'] = {}
+    nonbs_flag = False
     if text_metadata is not None:
         #Parses Metadata coming from text file
         headers = { 
@@ -287,7 +326,8 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
             'read2': 'file2', 'end2': 'file2', 'file2': 'file2', 'location2': 'file2',
             'description': 'description', 'desc': 'description',
             'centre': 'centre', 'center': 'centre',
-            'platform': 'platform'
+            'platform': 'platform',
+            'bisulfite': 'bisulfite', 'bisulphite': 'bisulfite', 'bis': 'bisulfite'
             }
         data_types = ['PAIRED', 'INTERLEAVED', 'SINGLE', 'BAM', 'SAM', 'STREAM', 'PAIRED_STREAM', 'SINGLE_STREAM', 'COMMAND', 'SINGLE_COMMAND', 'PAIRED_COMMAND']
         paired_types = ['PAIRED', 'INTERLEAVED', 'PAIRED_STREAM', 'PAIRED_COMMAND']
@@ -330,7 +370,11 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
                             elif head == "file1":
                                 file1 = field
                             elif head == "file2":
-                                file2 = field    
+                                file2 = field
+                            elif head == "bisulfite":
+                                sampleDirectory[head] = bool(distutils.util.strtobool(field.lower()))
+                                if not sampleDirectory[head]:
+                                    nonbs_flag = True;
                             elif head == "type":
                                 field = field.upper()
                                 if field in data_types:
@@ -411,6 +455,7 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
         if inputs_path != None:
             shutil.copy(text_metadata, inputs_path)
     elif lims_cnag_json is not None:
+        bisulfite_applications = ("WG-BS-Seq", "BSseq", "oxBS-Seq", "CustomCaptureBS-Seq","Other-BS")
         # Parses json from cnag lims
         with open(lims_cnag_json) as jsonFile:
             sampleDirectory = json.load(jsonFile)
@@ -426,15 +471,24 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
                     sample["sample_name"] = element["sample_name"]
                     sample["platform"] = 'Illumina'
                     sample["centre"] = 'CNAG'
+                    if element["application"] in bisulfite_applications:
+                        sample["bisulfite"] = True
+                    else:
+                        sample["bisulfite"] = False
+                        nonbs_flag = True;
                     generalDictionary['sampleData'][fli] = sample
 
         if inputs_path != None:
             shutil.copy(lims_cnag_json, inputs_path)
+
     if os.path.exists(jsonOutput):
         js = JSONdata(jsonOutput)
         generalDictionary['contigs']=js.contigs
+        os.remove(jsonOutput)
     else:
-        generalDictionary['contigs']={}    
+        generalDictionary['contigs']={}
+        
+    generalDictionary['config']['DEFAULT']['nonbs_flag'] = nonbs_flag
     js = JSONdata(jdict = generalDictionary)
     # Initialize or check database
     database.setup(js)
@@ -449,16 +503,21 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
         ix_files[ftype]=(fname, status)
     db.close()
     printer = logging.gemBS.gt
-    for x in ('Reference','Index','Contig_sizes','dbSNP_idx'):
+    miss_flag = False
+    for x in ('Reference','Index','Contig_sizes','NonBS_Index','dbSNP_idx'):
         v = ix_files.get(x.lower())
-        if v:
-            st = 'OK' if v[1] == 1 else 'Missing'
-            printer("{} file '{}': Status {}".format(x, v[0], st))
+        if v and v[1] != 1:
+            printer("{} file '{}': Missing".format(x, v[0]))
+            if x != 'Reference':
+                miss_flag = True
+    if miss_flag:
+        printer("\n: To generate missing files run gemBS index")
+        
     generalDictionary['contigs']=js.contigs
     with open(jsonOutput, 'w') as of:
         json.dump(generalDictionary, of, indent=2)
 
-def index(input_name, index_name, extra_fasta_files=None,threads=None,tmpDir=None,sampling_rate=None):
+def index(input_name, index_name, extra_fasta_files=None,threads=None,tmpDir=None,sampling_rate=None,nonbs_flag=False):
     """Run the gem-indexer on the given input. Input has to be the path
     to a single fasta file that contains the genome to be indexed.
     Output should be the path to the target index file. Note that
@@ -482,8 +541,15 @@ def index(input_name, index_name, extra_fasta_files=None,threads=None,tmpDir=Non
                 raise CommandException("Reference file '{}' does not exist".format(f))
             
         gcat.extend(extra_fasta_files)
-        output = index_base + "_gemBS.tmp.gz"
-        process = run_tools([gcat,['pigz']], name='gemBS_cat', output = output)
+        compress_bin = executables['pigz']
+        if compress_bin == None:
+            compress_bin = executables['gzip']
+        if compress_bin == None:
+            output = index_base + "_gemBS.tmp"
+            process = run_tools([gcat], name='gemBS_cat', output = output)
+        else:
+            output = index_base + "_gemBS.tmp.gz"
+            process = run_tools([gcat,[compress_bin]], name='gemBS_cat', output = output)
         if process.wait() != 0:
             if os.path.exists(output):
                 os.remove(output)
@@ -497,11 +563,13 @@ def index(input_name, index_name, extra_fasta_files=None,threads=None,tmpDir=Non
                            
     indexer = [
         executables['gem-indexer'],
-        '-b',
         '-i',f_in,
         '-o',index_base
     ]
 
+    if not nonbs_flag:
+        indexer.append('-b')
+        
     if tmpDir:
         tmpDir = tmpDir.rstrip('/') + '/'
         indexer.extend(['--tmp-folder', tmpDir])
@@ -517,7 +585,7 @@ def index(input_name, index_name, extra_fasta_files=None,threads=None,tmpDir=Non
         
     if process.wait() != 0:
         for f in (f_in, index_base + '.gem', index_base + '.info', index_base + '.sa.tmp'):
-            if os.path.exists(f):
+            if os.path.exists(f) and f != input_name:
                 os.remove(f)
         raise ValueError("Error while executing the Bisulphite gem-indexer")
     
@@ -545,11 +613,16 @@ def dbSNP_index(list_dbSNP_files=[],dbsnp_index=""):
             files = glob.glob(dbSnpFile)
             if files:
                 db_snp_index.extend(files)
-        #Pigz pipe            
-        pigz = ["pigz"]
         #Create Pipeline            
         tools = [db_snp_index]
-        tools.append(pigz)
+        
+        #Compress pipe            
+        compress_bin = executables['pigz']
+        if compress_bin == None:
+            compress_bin = executables['gzip']
+        if compress_bin != None:
+            tools.append([compress_bin])
+
         #Process dbSNP
         process_dbsnp = run_tools(tools,name="dbSNP-indexer",output=dbsnp_index)
         if process_dbsnp.wait() != 0:
@@ -617,7 +690,7 @@ def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
         mapping.extend(["--i1",inputFiles[0],"--i2",inputFiles[1]])
     elif len(inputFiles) == 1:
         if ftype in ['SAM', 'BAM']:
-            input_pipe.extend([executables['samtools'],"bam2fq", inputFiles[0]])
+            input_pipe.extend([executables['samtools'],"bam2fq", "--threads", str(threads), inputFiles[0]])
         elif ftype in ['COMMAND', 'SINGLE_COMMAND', 'PAIRED_COMMAND']:
             input_pipe.extend(['/bin/sh','-c',inputFiles[0]])            
         else:
@@ -656,7 +729,7 @@ def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
     readNameClean = [executables['readNameClean']]
          
     #BAM SORT
-    bamSort = [executables['samtools'],"sort","-T",os.path.join(tmpDir,name),"-@",threads,"-m","2G","-o",outfile,"-"]
+    bamSort = [executables['samtools'],"sort","-T",os.path.join(tmpDir,name),"-@",threads,"-o",outfile,"-"]
     
     tools = [mapping,readNameClean,bamSort]
     
@@ -701,7 +774,7 @@ def merging(inputs=None,sample=None,threads="1",outname=None,tmpDir="/tmp/"):
     
     #Samtools index
     logfile = os.path.join(output,"bam_index_{}.err".format(sample))
-    indexing = [executables['samtools'], "index", bam_filename, index_filename]
+    indexing = [executables['samtools'], "index", "-@", threads, bam_filename, index_filename]
     md5sum = ['md5sum',bam_filename]
     processIndex = run_tools([indexing],name="Indexing",logfile=logfile)
     processMD5 = run_tools([md5sum],name="BAM MD5",output=md5_filename)
@@ -716,7 +789,7 @@ def merging(inputs=None,sample=None,threads="1",outname=None,tmpDir="/tmp/"):
 
 class BsCaller:
     def __init__(self,reference,species,right_trim=0,left_trim=5,keep_unmatched=False,
-                 keep_duplicates=False,contig_size=None,dbSNP_index_file="",threads="1",
+                 keep_duplicates=False,ignore_duplicates=False,contig_size=None,dbSNP_index_file="",threads="1",
                  mapq_threshold=None,bq_threshold=None,
                  haploid=False,conversion=None,ref_bias=None,sample_conversion=None):
         self.reference = reference
@@ -725,6 +798,7 @@ class BsCaller:
         self.left_trim = left_trim
         self.keep_unmatched = keep_unmatched
         self.keep_duplicates = keep_duplicates
+        self.ignore_duplicates = ignore_duplicates
         self.dbSNP_index_file = dbSNP_index_file
         self.threads = threads
         self.mapq_threshold = mapq_threshold
@@ -752,6 +826,8 @@ class BsCaller:
             parameters_bscall.append('-k')
         if self.keep_duplicates:
             parameters_bscall.append('-d')
+        if self.ignore_duplicates:
+            parameters_bscall.append('--ignore-duplicates')
         if self.haploid:
             parameters_bscall.append('-1')
         if self.conversion != None:
@@ -761,7 +837,7 @@ class BsCaller:
                 else:
                     parameters_bscall.extend(['--conversion', self.conversion])
         if self.ref_bias != None:
-            parameters_bscall.extend(['--reference_bias', self.ref_bias])
+            parameters_bscall.extend(['--reference-bias', self.ref_bias])
         #Thresholds
         if self.mapq_threshold != None:
             parameters_bscall.extend(['--mapq-threshold', self.mapq_threshold])
@@ -910,6 +986,8 @@ class MethylationCallThread(th.Thread):
                     if self.dry_run_json:
                         task={}
                         task['command']=com
+                        task['sample_barcode']=sample
+                        task['pool']=pool
                         task['inputs']=[input_bam]
                         task['outputs']=[bcf_file, report_file, log_file]
                         desc="call {} {}".format(sample,pool)
@@ -936,6 +1014,7 @@ class MethylationCallThread(th.Thread):
                         task={}
                         task['command']=com
                         task['inputs']=list_bcfs
+                        task['sample_barcode']=sample
                         odir = os.path.dirname(fname)
                         bcfSampleMd5 = os.path.join(odir,"{}.bcf.md5".format(sample))
                         idxfile = os.path.join(odir,"{}.bcf.csi".format(sample))
@@ -957,7 +1036,7 @@ class MethylationCallThread(th.Thread):
 def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=None,samples=None,right_trim=0,left_trim=5,dry_run_com=None,
                        keep_unmatched=False,keep_duplicates=False,dbSNP_index_file="",threads="1",jobs=1,remove=False,concat=False,
                        mapq_threshold=None,bq_threshold=None,haploid=False,conversion=None,ref_bias=None,sample_conversion=None,
-                       no_merge=False,json_commands=None,dry_run=False,dry_run_json=None,ignore_db=None):
+                       no_merge=False,json_commands=None,dry_run=False,dry_run_json=None,ignore_db=None,ignore_duplicates=False):
 
     """ Performs the process to make met5Bhylation calls.
     
@@ -971,6 +1050,7 @@ def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=No
     dry_run_com -- Partial command for dry-run
     keep_unmatched -- Do not discard reads that do not form proper pairs
     keep_duplicates -- Do not merge duplicate reads  
+    ignore_duplicates -- Ignore duplicate flag from SAM/BAM files
     dbSNP_index_file -- dbSNP Index File            
     threads -- Number of threads
     mapq_threshold -- threshold for MAPQ scores
@@ -1003,7 +1083,7 @@ def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=No
                 contig_size[fd[0]] = int(fd[1])
 
     bsCall = BsCaller(reference=reference,species=species,right_trim=right_trim,left_trim=left_trim,
-                      keep_unmatched=keep_unmatched,keep_duplicates=keep_duplicates,contig_size=contig_size,
+                      keep_unmatched=keep_unmatched,keep_duplicates=keep_duplicates,ignore_duplicates=ignore_duplicates,contig_size=contig_size,
                       dbSNP_index_file=dbSNP_index_file,threads=threads,mapq_threshold=mapq_threshold,bq_threshold=bq_threshold,
                       haploid=haploid,conversion=conversion,ref_bias=ref_bias,sample_conversion=sample_conversion)
 
@@ -1024,7 +1104,9 @@ def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=No
 
             
 def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=False,cpg=False,non_cpg=False,allow_het=False,
-                         inform=1,phred=20,min_nc=1,bedMethyl=False,bigWig=False,contig_list=None,contig_size_file=None):
+                         inform=1,phred=20,min_nc=1,bedMethyl=False,bigWig=False,contig_list=None,contig_size_file=None,
+                         snps=None,snp_list=None,snp_db=None,ref_bias=None):
+    
     """ Filters bcf methylation calls file 
 
     bcfFile -- bcfFile methylation calling file  
@@ -1045,7 +1127,10 @@ def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=Fal
             f.write("{}\t0\t{}\n".format(ctg, size))
 
     bcftools = [executables['bcftools'],'view','-R',contig_bed,'-Ou',bcfFile]
-    mextr = [executables['bcftools'],'+mextr','--','-z']
+    mextr_com = [executables['bcftools'],'+mextr','--','-z']
+    mextr = []
+    if ref_bias:
+        mextr.extend(['--reference-bias', ref_bias])       
     if cpg:
         mextr.extend(['-o', outbase + '_cpg.txt'])
     if non_cpg:
@@ -1063,17 +1148,32 @@ def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=Fal
     if allow_het:
         mextr.extend(['--select', 'het'])
 
-    pipeline = [bcftools, mextr]
-    if bigWig:
-        pipeline.append(wig2bigwig)
+    if mextr:
+        mextr_com.extend(mextr)
+        pipeline = [bcftools, mextr_com]
+        if bigWig:
+            pipeline.append(wig2bigwig)
         
-    logfile = os.path.join(output_dir,"mextr_{}.err".format(name))
-    process = run_tools(pipeline, name="Methylation Extraction", logfile=logfile)
-    if process.wait() != 0:
-        raise ValueError("Error while extracting methylation calls.")
+        logfile = os.path.join(output_dir,"mextr_{}.err".format(name))
+        process = run_tools(pipeline, name="Methylation Extraction", logfile=logfile)
+
+    if snps:
+        snpxtr = [executables['bcftools'],'+snpxtr','--','-z','-o',outbase + '_snps.txt.gz']
+        if snp_list:
+            snpxtr.extend(['-s',snp_list])
+        if snp_db:
+            snpxtr.extend(['-D',snp_db])
+        snp_logfile = os.path.join(output_dir,"snpxtr_{}.err".format(name))
+        process_snp = run_tools([bcftools, snpxtr], name="SNP Extraction",logfile=snp_logfile)
+        if process_snp.wait() != 0:
+            raise ValueError("Error while extracting SNP calls.")
+
+    if mextr:
+        if process.wait() != 0:
+            raise ValueError("Error while extracting methylation calls.")
 
     os.remove(contig_bed)
-    
+
     # Now generate indexes and bigBed files if required
     if cpg:
         tfile = "{}_cpg.txt.gz.tbi".format(outbase)
@@ -1082,9 +1182,15 @@ def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=Fal
         logfile = os.path.join(output_dir,"tabix_{}_cpg.err".format(name))
         tabix = [executables['tabix'], '-p', 'bed', '-S', '1', "{}_cpg.txt.gz".format(outbase)]
         cpg_idx_proc = run_tools([tabix],name="Index Methylation CpG files", logfile=logfile)
-        if cpg_idx_proc.wait() != 0:
-            raise ValueError("Error while indexing CpG calls.")
 
+    if snps:
+        tfile = "{}_snp.txt.gz.tbi".format(outbase)
+        if os.path.exists(tfile):
+            os.remove(tfile)
+        logfile = os.path.join(output_dir,"tabix_{}_snps.err".format(name))
+        tabix = [executables['tabix'], '-S', '1', '-s' '1', '-b', '2', '-e', '2', "{}_snps.txt.gz".format(outbase)]
+        snp_idx_proc = run_tools([tabix],name="Index SNP files", logfile=logfile)
+        
     if non_cpg:
         tfile = "{}_non_cpg.txt.gz.tbi".format(outbase)
         if os.path.exists(tfile):
@@ -1132,6 +1238,10 @@ def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=Fal
             if p.wait() != 0:
                 raise ValueError("Error while making bigBed files.")
             os.remove(bm_tfile[ix])
+    if snps:
+        if snp_idx_proc.wait() != 0:
+            raise ValueError("Error while indexing SNP calls.")
+        
     return os.path.abspath(output_dir)
 
 def bsConcat(list_bcfs=None,sample=None,bcfSample=None):

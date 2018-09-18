@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <locale.h>
 #include <unistd.h>
 #include <string.h>
 #include <inttypes.h>
@@ -250,6 +252,7 @@ const char *usage(void)
     "   -s, --select            Select mode for sites/CpGs\n"
     "         hom               Select on homozygote sites/CpGs (default)\n"
     "         het               Select on heterozygote sites/CpGs\n"
+    "   -R, --reference-bias    Reference bias for re-calling (default 2)\n"
     "   -M, --min-nc            Minimum number of non-converted bases for non CpG site (default 1)\n"
     "   -p, --prop              Minimum proportion of sites/CpGs that must pass (default 0.0)\n"
     "   -N, --number            Minimum number of sites/CpGs that must pass (default 1)\n"
@@ -309,7 +312,6 @@ static void check_hdr_params(args_t *a) {
 int init(int argc, char **argv, bcf_hdr_t *in, bcf_hdr_t *out __unused__)
 {
   args.hdr  = in;
-
   check_hdr_params(&args);
   static struct option loptions[] = {
     {"cpgfile",required_argument,0,'c'},
@@ -324,6 +326,7 @@ int init(int argc, char **argv, bcf_hdr_t *in, bcf_hdr_t *out __unused__)
     {"select",required_argument,0,'s'},
     {"prop",required_argument,0,'p'},
     {"min-nc",required_argument,0,'M'},
+    {"reference-bias",required_argument,0,'R'},
     {"number",required_argument,0,'N'},
     {"inform",required_argument,0,'I'},
     {"threshold",required_argument,0,'T'},
@@ -335,7 +338,7 @@ int init(int argc, char **argv, bcf_hdr_t *in, bcf_hdr_t *out __unused__)
   };
   int c;
   bool mult_comp = false;
-  while ((c = getopt_long(argc, argv, "?Qh:o:c:b:n:r:m:M:I:s:p:N:T:t:w:gzHjxa",loptions,NULL)) >= 0) {
+  while ((c = getopt_long(argc, argv, "?Qh:o:c:b:n:r:m:R:M:I:s:p:N:T:t:w:gzHjxa",loptions,NULL)) >= 0) {
     switch (c) {
     case 'a':
       args.append_mode = true;
@@ -352,6 +355,9 @@ int init(int argc, char **argv, bcf_hdr_t *in, bcf_hdr_t *out __unused__)
       break;
     case 'r':
       args.reportfilename = optarg;
+      break;
+    case 'R':
+      args.ref_bias = atof(optarg);
       break;
     case 'H':
       args.header = false;
@@ -457,6 +463,7 @@ bcf1_t *process(bcf1_t *rec)
   static bool valid[2] = {false, false};
   static bcf1_t prev_rec;
   
+  (void)setlocale(LC_NUMERIC, "C");
   int ns = bcf_hdr_nsamples(args.hdr);
   stats_t *st = args.stats;
   if(st != NULL) st->n_sites++;
