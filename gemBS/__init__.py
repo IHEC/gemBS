@@ -723,7 +723,7 @@ def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
     #Bisulfite Conversion Values
     if under_conversion != "" and under_conversion != None:
         mapping.extend(["--underconversion_sequence",under_conversion])
-    if over_conversion != "" and under_conversion != None:
+    if over_conversion != "" and over_conversion != None:
         mapping.extend(["--overconversion_sequence",over_conversion])
     #READ FILTERING
     readNameClean = [executables['readNameClean']]
@@ -732,7 +732,7 @@ def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
     bamSort = [executables['samtools'],"sort","-T",os.path.join(tmpDir,name),"-@",threads,"-o",outfile,"-"]
     
     tools = [mapping,readNameClean,bamSort]
-    
+
     if input_pipe: tools.insert(0, input_pipe)
     process = run_tools(tools, name="bisulfite-mapping", logfile=logfile)
     if process.wait() != 0:
