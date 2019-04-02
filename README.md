@@ -92,6 +92,27 @@ Documentation can be found at
 ----------
 Changelog:
 ----------
+
+    3.2.10 Correct regex patch for single end reads
+    3.2.9 Update Singularity and Dockerfile recipes to allow kemp utils to be built correctly
+    3.2.9 Make setup.py and gemBS/commands.py read the version information from gemBS/version.py, so ensuring consistency
+    3.2.9 Fix bug added in last version where options in config file were not being taken into account
+    3.2.8 Fix mis specification errors in long options for mextr. 
+    3.2.8 Fix bug where mextr (methyl extract plugin for bcftools) would crash if cpg output  option was not set.
+    3.2.7 Apply patches for bugs in handling single end reads (suggested by I. Moghul)
+    3.2.7 Changed regex for filenames to make it more general (suggested by I. Moghul)
+    3.2.7 Fixed bug (reported by chhylp123) where zero arguments to some options were being ignored
+    3.2.6 Cleaned up compilation and cleaning of gemBS tools
+    3.2.6 Fixed python error if either the over conversion reference sequence was not defined
+    3.2.6 Added check in bs_call that conversion parameters are valid (between 0 and 1)
+    3.2.6 Perform more stringent sanity checking on conversion vaalues when autocomputed by gemBS
+    3.2.6 Use --diasble-lzma configuration flag for samtools and bcftools as we don't need it and it removes an unneccesary dependency
+    3.2.6 Add install options --disable-cuda (on by default) and --enable-cuda that affect GEM3 comppilation
+    3.2.6 Bug fix with incorrect handling of duplicate reads
+    3.2.5 Minor bug fix - correct error with non-paired end non-bisulfite reads
+    3.2.4 Modify the bisulfite processing in gem-mapper to be more efficient (in particular for the non-stranded option)
+    3.2.4 Modify gemBS to use the new conversion options for gem-mapper
+    3.2.4 Switch gem-mapper to use option --underconversion-sequence and --overconversion-sequence rather than --underconversion_sequence to be consistent with other options
     3.2.3 Fixed bug if conversion parameters were not set
     3.2.2 Rework non-stranded mode so that both possible conversions are tried and the results merged
     3.2.2 Fix bug where non-stranded flag was not being passed to mapper in paired end mode

@@ -468,26 +468,26 @@ class Mapping(BasicPipeline):
                     for fli in (fliInfo.getFli(),fliInfo.alt_fli):
                         if fli == None:
                             continue
-                        reg = re.compile("(.*){}(.*)(.)[.](fastq|fq|fasta|fa|bam|sam)([.][^.]+)?$".format(fli, re.I))
+                        reg = re.compile("(.*){}(.*?)([12])?[.](fastq|fq|fasta|fa|bam|sam)([.][^.]+)?$".format(fli, re.I))
                         mlist = []
                         for file in os.listdir(input_dir):
                             m = reg.match(file)
                             if m: 
-                                if m.group(5) in [None, '.gz', '.xz', 'bz2', 'z']: 
+                                if m.group(5) in [None, '.gz', '.xz', 'bz2', 'z']:
                                     if ftype == 'PAIRED' and (m.group(3) not in ['1', '2'] or m.group(4).lower() not in ['fasta', 'fa', 'fastq', 'fq']): continue
                                     if ftype in ['SAM', 'BAM'] and m.group(4).lower() not in ['sam', 'bam']: continue
                                     mlist.append((file, m))
                             
                         if len(mlist) == 1:
                             (file, m) = mlist[0]
-                            skip = false
+                            skip = False
                             if ftype is None:
                                 if m.group(4).lower() in ['SAM', 'BAM']:
                                     ftype = 'BAM' if m.group(4).lower == 'BAM' else 'SAM'
                                 else:
                                     ftype = 'INTERLEAVED' if self.paired else 'SINGLE'
                             elif ftype == 'PAIRED' or (ftype == 'SAM' and m.group(4).lower != 'sam') or (ftype == 'BAM' and m.group(4).lower() != 'bam'): skip = True
-                            if not skip: inputFiles.append(file)
+                            if not skip: inputFiles.append(os.path.join(input_dir,file))
                         elif len(mlist) == 2:
                             (file1, m1) = mlist[0]
                             (file2, m2) = mlist[1]
@@ -965,12 +965,16 @@ class MethylationCall(BasicPipeline):
                     oc = stats.getOverConversionRate()
                     if uc == "NA":
                         uc = 0.99
-                    elif uc < 0.8:
-                        uc = 0.8
+                    elif uc < 0.95:
+                        uc = 0.95
+                    elif uc > 0.999:
+                        uc = 0.999
                     if oc == "NA":
                         oc = 0.05
-                    elif oc > 0.2:
-                        oc = 0.2
+                    elif oc > 0.15:
+                        oc = 0.15
+                    elif oc < 0.0:
+                        oc = 0.01
                     self.sample_conversion[sample] = "{:.4f},{:.4f}".format(1-uc,oc)
 
         # Get fasta reference && dbSNP index if supplied
@@ -1089,19 +1093,19 @@ class MethylationCall(BasicPipeline):
                     if Mapping.gemBS_json != '.gemBS/gemBS.json':
                         com.extend(['-j',Mapping.gemBS_json])
                 com1 = []
-                if args.threads: com1.extend(['-t',args.threads])
-                if args.remove: com1.append('-r')
+                if args.threads != None: com1.extend(['-t',args.threads])
+                if args.remove != None: com1.append('-r')
                 com2 = []
-                if args.mapq_threshold: com2.extend(['-q',str(args.mapq_threshold)])
-                if args.qual_threshold: com2.extend(['-Q',str(args.mapq_threshold)])
-                if args.right_trim: com2.extend(['--right-trim',str(args.right_trim)])
-                if args.left_trim: com2.extend(['--left-trim',str(args.left_trim)])
-                if args.keep_duplicates: com2.append('-u')
-                if args.ignore_duplicates: com2.append('-U')
-                if args.keep_unmatched: com2.append('-k')
-                if args.haploid: com2.append('--haploid')
-                if args.species: com2.append('--species')
-                if args.ref_bias: com2.extend(['-B',args.ref_bias])
+                if args.mapq_threshold != None: com2.extend(['-q',str(args.mapq_threshold)])
+                if args.qual_threshold != None: com2.extend(['-Q',str(args.mapq_threshold)])
+                if args.right_trim != None: com2.extend(['--right-trim',str(args.right_trim)])
+                if args.left_trim != None: com2.extend(['--left-trim',str(args.left_trim)])
+                if args.keep_duplicates != None: com2.append('-u')
+                if args.ignore_duplicates != None: com2.append('-U')
+                if args.keep_unmatched != None: com2.append('-k')
+                if args.haploid != None: com2.append('--haploid')
+                if args.species != None: com2.append('--species')
+                if args.ref_bias != None: com2.extend(['-B',args.ref_bias])
                 dry_run_com = [com, com1, com2]
                 
             else:
