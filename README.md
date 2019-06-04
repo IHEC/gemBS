@@ -93,6 +93,12 @@ Documentation can be found at
 Changelog:
 ----------
 
+    3.3.0 Make new release for IHEC
+    3.3.0 Switch conversion default in IHEC_standard configuration to 0.01,0.05 rather than auto, which can give odd results if conversion controls not present or not working correctly
+    3.3.0 Fix bug where conversion parameters could be ignored
+    3.2.13 Fix formatting bug in mextr with multiple samples (not triggered in normal gemBS use)
+    3.2.12 Ensure that conversion statistics are correctly calculated for non-stranded or reverse conversion protocols
+    3.2.11 Introduce reverse_conversion option for mapping where read 1 is G2A converted and read 2 is C2T converted
     3.2.10 Correct regex patch for single end reads
     3.2.9 Update Singularity and Dockerfile recipes to allow kemp utils to be built correctly
     3.2.9 Make setup.py and gemBS/commands.py read the version information from gemBS/version.py, so ensuring consistency

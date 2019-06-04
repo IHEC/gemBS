@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
-#include <locale.h>
 #include <unistd.h>
 #include <string.h>
 #include <inttypes.h>
@@ -32,7 +31,8 @@ static FILE *open_ofile(char *name, int compress, bool append) {
       char *p = strrchr(tname, '.');
       if(p == NULL || strcmp(p + 1, suffix)) {
 	// No, so we will have to add it
-	asprintf(&tname, "%s.%s", name, suffix);
+	tname = malloc(strlen(name) + strlen(suffix) + 2);
+	sprintf(tname, "%s.%s", name, suffix);
       }
       int i = child_open(WRITE, tname, cdata->comp_path[comp_ix][0]);
       fp = fdopen(i, "w");
@@ -108,8 +108,9 @@ static void print_file_header(FILE *fp, int ns, char **names) {
     fputs("Contig\tPos0\tPos1\tRef", fp);
     for(int i = 0; i < ns; i++) {
       char *name = names[i];
-      fprintf(fp, "\t%s:Call\t%s:Flags\t%s:Meth\t%s:non_conv\t%s:conv\t%s:support_call\t%s:total\n", name, name, name, name, name, name, name);
+      fprintf(fp, "\t%s:Call\t%s:Flags\t%s:Meth\t%s:non_conv\t%s:conv\t%s:support_call\t%s:total", name, name, name, name, name, name, name);
     }
+		fputc('\n', fp);
   }
 }
 
@@ -461,11 +462,10 @@ static fmt_field_t tags[] = {
 bcf1_t *process(bcf1_t *rec)
 {
   static int idx;
-  static int32_t curr_rid = -1, prev_pos, mq[2];
+  static int32_t curr_rid = -1, prev_pos;
   static bool valid[2] = {false, false};
   static bcf1_t prev_rec;
   
-  (void)setlocale(LC_NUMERIC, "C");
   int ns = bcf_hdr_nsamples(args.hdr);
   stats_t *st = args.stats;
   if(st != NULL) st->n_sites++;
@@ -561,8 +561,6 @@ bcf1_t *process(bcf1_t *rec)
 	  }
 	}
       }
-      mq[idx] = -1;
-      if(mq_p != NULL) mq[idx] = (int32_t)(0.5 + sqrt(ms_mq / (double)tot_n));
       valid[idx] = true;
       // Here is the logic for deciding what we print
       if(rec->rid != curr_rid) curr_rid = rec->rid;
