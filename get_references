@@ -1,0 +1,17 @@
+#!/bin/bash
+set -eufx -o pipefail
+
+mkdir reference
+cd reference
+
+lambda='https://www.ncbi.nlm.nih.gov/search/api/sequence/NC_001416.1/?report=fasta'
+hgref='http://www.epigenomes.ca/data/CEMT/resources/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz'
+
+
+
+wget $hgref
+wget conversion_control_lambda.fa  $lambda 
+
+gunzip -c GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz > GCA_000001405.15_GRCh38_no_alt_analysis_set.fasta
+
+echo '__ok__'

@@ -7,15 +7,14 @@ echoerr() { echo "$@" 1>&2; }
 
 foreach(){
   while read line; do
-	if [ $# == "2" ]; then 
-		echoerr "#applying \"$1 $line\""
-	fi
-	$1 $line
-	STATUS=$?
-	if [ $# == "2" ]; then
-        	echoerr "#return:$STATUS $line $(now)"
-	fi
-
+    if [ $# == "2" ]; then 
+      echoerr "#applying \"$1 $line\""
+    fi
+    $1 $line
+    jobstatus=$?
+    if [ $# == "2" ]; then
+      echoerr "#return:$jobstatus $line $(now)"
+    fi
   done < "$2"
 
   if [ $# == "2" ]; then
