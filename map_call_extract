@@ -1,0 +1,42 @@
+#!/bin/bash
+
+
+
+HOME=$PWD
+cd output
+
+binds="-B $HOME/output:/output,$HOME/fq:/fq,$HOME/reference:/ref"
+image=$HOME/gembs_latest.sif
+
+
+cmd="singularity exec $binds $image gemBS --loglevel debug index"
+$cmd
+echo "#__ok:$? $cmd"
+
+
+cmd="singularity exec $binds $image gemBS --loglevel debug prepare -c mcf10a_ihec.conf -t mcf10a.csv"
+$cmd
+echo "#__ok:$? $cmd"
+
+
+cmd="singularity exec $binds $image gemBS --loglevel debug index"
+$cmd
+echo "#__ok:$? $cmd"
+
+
+
+for stage in map call extract map-report call-report; do
+  cmd="singularity exec $binds $image gemBS --loglevel debug $stage"
+  $cmd
+  echo "#__ok:$? $cmd"
+done
+echo "#__ok__"
+
+
+
+
+
+
+
+
+

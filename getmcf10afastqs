@@ -1,0 +1,32 @@
+#!/bin/bash
+
+#set -euf -o pipefail
+
+
+echoerr() { echo "$@" 1>&2; }
+
+foreach(){
+  while read line; do
+	if [ $# == "2" ]; then 
+		echoerr "#applying \"$1 $line\""
+	fi
+	$1 $line
+	STATUS=$?
+	if [ $# == "2" ]; then
+        	echoerr "#return:$STATUS $line $(now)"
+	fi
+
+  done < "$2"
+
+  if [ $# == "2" ]; then
+    echoerr "#...finished $(now)"        
+  fi
+}
+
+
+mkdir fq
+cd fq 
+
+foreach wget $1
+
+
