@@ -3,6 +3,7 @@ import sqlite3
 import re
 import fnmatch
 import logging
+import json
 import threading as th
 from .utils import CommandException
 
@@ -84,7 +85,7 @@ class database(sqlite3.Connection):
         c = self.cursor()
         c.execute("CREATE TABLE IF NOT EXISTS indexing (file text, type text PRIMARY KEY, status int)")
         c.execute("CREATE TABLE IF NOT EXISTS mapping (filepath text PRIMARY KEY, fileid text, sample text, type text, status int)")
-        c.execute("CREATE TABLE IF NOT EXISTS calling (filepath test PRIMARY KEY, poolid text, sample text, type text, status int)")
+        c.execute("CREATE TABLE IF NOT EXISTS calling (filepath test PRIMARY KEY, poolid text, sample text, poolsize int, type text, status int)")
         c.execute("CREATE TABLE IF NOT EXISTS extract (filepath test PRIMARY KEY, sample text, status int)")
         self.commit()
 
@@ -123,7 +124,7 @@ class database(sqlite3.Connection):
 
         c = self.cursor()
         c.execute("REPLACE INTO indexing VALUES (?, 'reference', 1)",(ref,))
-        cdef =config['DEFAULT']
+        cdef = config['DEFAULT']
         index = cdef.get('index', None)
         nonbs_index = cdef.get('nonbs_index', None)
         nonbs_flag = cdef.get('nonbs_flag', False)
@@ -159,7 +160,20 @@ class database(sqlite3.Connection):
                 elif index.endswith('.gem'):
                     csizes = index[:-3] + 'contig.sizes'
                 else:
-                    csizes = index + '.contig.sizes'                
+                    csizes = index + '.contig.sizes'
+        if index == None:
+            greference = os.path.join(index_dir, reference_basename) + '.gemBS.ref'
+            contig_md5 = os.path.join(index_dir, reference_basename) + '.gemBS.contig_md5'
+        else:
+            if index.endswith('.BS.gem'):
+                greference = index[:-6] + 'gemBS.ref'
+                contig_md5 = index[:-6] + 'gemBS.contig_md5'
+            elif index.endswith('.gem'):
+                greference = index[:-3] + 'gemBS.ref'
+                contig_md5 = index[:-3] + 'gemBS.contig_md5'
+            else:
+                greference = index + '.gemBS.ref'
+                contig_md5 = index + '.gemBS.contig_md5'
         if index == None:
             index = os.path.join(index_dir, reference_basename) + '.BS.gem'
             index_ok = 1 if os.path.exists(index) else 0
@@ -180,8 +194,12 @@ class database(sqlite3.Connection):
             except IOError:
                 nonbs_index_ok = 0
         csizes_ok = 1 if os.path.exists(csizes) else 0
+        greference_ok = 1 if os.path.exists(greference) and os.path.exists(greference + '.fai') and os.path.exists(greference + '.gzi') else 0
+        contig_md5_ok = 1 if os.path.exists(contig_md5) else 0
         c.execute("REPLACE INTO indexing VALUES (?, 'index', ?)",(index, index_ok))
         c.execute("REPLACE INTO indexing VALUES (?, 'contig_sizes', ?)",(csizes,csizes_ok))
+        c.execute("REPLACE INTO indexing VALUES (?, 'gembs_reference', ?)",(greference,greference_ok))
+        c.execute("REPLACE INTO indexing VALUES (?, 'contig_md5', ?)",(contig_md5,contig_md5_ok))
         if nonbs_index != None:
             c.execute("REPLACE INTO indexing VALUES (?, 'nonbs_index', ?)",(nonbs_index,nonbs_index_ok))
         else:
@@ -198,7 +216,17 @@ class database(sqlite3.Connection):
         sdata = js.sampleData
         fastq_dir = config['mapping'].get('sequence_dir', '.')
         bam_dir = config['mapping'].get('bam_dir', '.')
+        cram_flag = config['mapping'].get('make_cram', None)
+        if cram_flag != None:
+            cram_flag = json.loads(str(cram_flag).lower())
+        else:
+            cram_flag = False
 
+        if cram_flag:
+            mapfile_suffix = 'cram'
+        else:
+            mapfile_suffix = 'bam'
+            
         c = self.cursor()
         slist = {}
         for k, v in sdata.items():
@@ -220,7 +248,7 @@ class database(sqlite3.Connection):
         for bc, fli in slist.items():
             sample = sdata[fli[0]].sample_name
             bam = bam_dir.replace('@BARCODE', bc).replace('@SAMPLE', sample)
-            sample_bam = os.path.join(bam, "{}.bam".format(bc))
+            sample_bam = os.path.join(bam, "{}.{}".format(bc, mapfile_suffix))
             key_used[sample_bam] = True
             old = old_tab.get(sample_bam, (0,0,0,0,0))
             if database._mem_db or sync:
@@ -307,7 +335,7 @@ class database(sqlite3.Connection):
             
         # And make list of contigs already completed in table
         if not sync:
-            for fname, pool, smp, ftype, status in c.execute("SELECT * FROM calling"):
+            for fname, pool, smp, psize, ftype, status in c.execute("SELECT * FROM calling"):
                 if ftype == 'POOL_BCF' and status != 0:
                     if pool in ctg_pools:
                         v = ctg_pools[pool]
@@ -330,13 +358,15 @@ class database(sqlite3.Connection):
             # in sync (which should mean that the db has been altered outside of
             # gemBS) and we can not be confident in the makeup of the pools
             logging.gemBS.gt("db tables have been altered and do not correspond - rebuilding")
-#            print(rebuild)
             for ctg in contig_size:
                 ctg_flag[ctg] = [0, None]
         else:
             for pool, v in ctg_pools.items():
                 if v[1]:
-                    pool_list.append((pool, v[0]))
+                    pool_size = 0
+                    for ctg in v[0]:
+                        pool_size += contig_size[ctg]
+                    pool_list.append((pool, v[0], pool_size))
                     pools_used[pool] = True
 
         # Handle requested list
@@ -362,7 +392,7 @@ class database(sqlite3.Connection):
                     small_contigs.append(ctg)
                     total_small += sz
                 else:
-                    pool_list.append((ctg, [ctg]))
+                    pool_list.append((ctg, [ctg], sz))
                 
         if small_contigs:
             k = (total_small // pool_size) + 1
@@ -374,13 +404,13 @@ class database(sqlite3.Connection):
                 while pname(ix) in pools_used: ix += 1
                 pools.append([pname(ix), [], 0])
                 ix += 1
-            for ctg in sorted(small_contigs, key = lambda x: -contig_size[x]):
-                pl = sorted(pools, key = lambda x: x[2])[0]
+            for ctg in sorted(small_contigs, key = lambda x: (-contig_size[x], ctg)):
+                pl = sorted(pools, key = lambda x: (x[2], x[0]))[0]
                 sz = contig_size[ctg]
                 pl[1].append(ctg)
                 pl[2] = pl[2] + sz
             for pl in pools:
-                pool_list.append((pl[0], pl[1]))
+                pool_list.append((pl[0], pl[1], pl[2]))
         bc_list = {}
         for k, v in sdata.items():
             bc_list[v.sample_barcode] = v.sample_name
@@ -393,7 +423,7 @@ class database(sqlite3.Connection):
             st = mrg_list.get(bc, 0)
             if database._mem_db or sync:
                 if os.path.isfile(bcf_file): st = 1            
-            c.execute("INSERT INTO calling VALUES (?, ?, ?, 'MRG_BCF', ?)", (bcf_file, '' , bc, st))
+            c.execute("INSERT INTO calling VALUES (?, ?, ?, ?, 'MRG_BCF', ?)", (bcf_file, '' , bc, 0, st))
             for pl in pool_list:
                 bcf_file = os.path.join(bcf, "{}_{}.bcf".format(bc, pl[0]))
                 if pl[0] in ctg_pools:
@@ -404,7 +434,7 @@ class database(sqlite3.Connection):
                         elif st == 1: st1 = 2
                 else:
                     st1 = 0
-                c.execute("INSERT INTO calling VALUES (?, ?, ?, 'POOL_BCF', ?)", (bcf_file, pl[0], bc, st1))
+                c.execute("INSERT INTO calling VALUES (?, ?, ?, ?, 'POOL_BCF', ?)", (bcf_file, pl[0], bc, pl[2], st1))
         for pl in pool_list:
             js.contigs[pl[0]] = []
             for ctg in pl[1]:

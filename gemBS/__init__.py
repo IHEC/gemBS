@@ -88,10 +88,10 @@ executables = execs_dict({
     "gem-indexer": "gem-indexer",
     "gem-mapper": "gem-mapper",
     "bs_call": "bs_call",
-    "wigToBigWig": "wigToBigWig",
-    "bedToBigBed": "bedToBigBed",
     "dbSNP_idx": "dbSNP_idx",
     "gemBS_cat": "gemBS_cat",
+    "md5_fasta": "md5_fasta",
+    "mextr": "mextr",
     "samtools": "samtools",
     "bcftools": "bcftools",
     "bgzip": "bgzip",
@@ -194,7 +194,10 @@ class JSONdata:
             ret = default
         if ret != None:
             if boolean:
-                ret = json.loads(str(ret).lower())
+                try:
+                    ret = json.loads(str(ret).lower())
+                except json.decoder.JSONDecodeError:
+                    ret = False
             elif int_type:
                 ret = int(ret)
             elif dir_type:
@@ -335,9 +338,9 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
         with open(text_metadata, 'r') as f:
             reader = csv.reader(f)
             try:
-                line = reader.__next__()
+                line = next(reader)
             except StopIteration:
-                raise ValueError('Empty configuration file');
+                raise ValueError('Empty configuration file')
             header_found = {}
             col_desc = []
             for i, entry in enumerate(line):
@@ -432,23 +435,6 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
                                 if len(file_dict) == 2 and not type in sampleDirectory:
                                     sampleDirectory['type'] = "PAIRED"
                         generalDictionary['sampleData'][fli] = sampleDirectory
-            elif len(line) == 5:
-                # Parse as simple 5 field csv file (no header)
-                while True:
-                    sampleDirectory = {}
-                    sampleDirectory["sample_barcode"] = line[0].strip()
-                    sampleDirectory["library_barcode"] = line[1].strip()
-                    flowcell = line[2].strip()
-                    lane = line[3].strip()
-                    index = line[4].strip()
-                    fli = "{}_{}_{}".format(flowcell, lane, index)
-                    fli1 = "{}_{}_0".format(flowcell, lane)
-                    sampleDirectory["alt_fli"] = fli1
-                    generalDictionary['sampleData'][fli] = sampleDirectory
-                    try:
-                        line = reader.next()
-                    except StopIteration:
-                        break
             else:
                 raise ValueError('Could not parse config file')
             
@@ -504,7 +490,7 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
     db.close()
     printer = logging.gemBS.gt
     miss_flag = False
-    for x in ('Reference','Index','Contig_sizes','NonBS_Index','dbSNP_idx'):
+    for x in ('Reference','Index','gemBS_Reference','Contig_sizes','NonBS_Index','dbSNP_idx'):
         v = ix_files.get(x.lower())
         if v and v[1] != 1:
             printer("{} file '{}': Missing".format(x, v[0]))
@@ -517,9 +503,90 @@ def prepareConfiguration(text_metadata=None,lims_cnag_json=None,configFile=None,
     with open(jsonOutput, 'w') as of:
         json.dump(generalDictionary, of, indent=2)
 
-def index(input_name, index_name, extra_fasta_files=None,threads=None,tmpDir=None,sampling_rate=None,nonbs_flag=False):
-    """Run the gem-indexer on the given input. Input has to be the path
-    to a single fasta file that contains the genome to be indexed.
+    """Check if file (assumed to exist) is BGZIPPED by checking for magic numbers in the 
+    first 16 bytes of the file (according to BGZIP specifications)
+    """
+def file_bgzipped(file_name):
+    a = b'\x1f\x8b\x08\x04'
+    b = b'\x06\x00\x42\x43\x02\x00'
+    ret = False
+    with open(file_name, "rb") as f:
+        st = f.read(16)
+        ret = (len(st) == 16 and st[0:4] == a and st[10:16] == b)
+    return(ret)
+
+def mk_gembs_reference(input_name, greference, contig_md5, extra_fasta_files=None, threads=None, populate_cache=False):
+    """Create bgzipped copy of reference file(s) in the same directory where
+    the index(es) are stored.  This file will serve as the reference for the 
+    bs_call command, and for this  purpose fai and gzi indexes of the reference will be created.
+    The contig_md5 files will be created at the same time.
+    """
+    
+    output_dir, base = os.path.split(greference)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    if not os.path.exists(greference):
+        md5_fasta = [executables['md5_fasta'], '-o', contig_md5]
+        if populate_cache:
+            md5_fasta.append('-p')
+        if extra_fasta_files == None and file_bgzipped(input_name):
+            os.symlink(os.path.abspath(input_name), greference)
+            mk_ref = False
+        else:
+            md5_fasta.append('-s')
+            mk_ref = True
+            
+        md5_fasta.append(input_name)
+        if extra_fasta_files != None:
+            for f in extra_fasta_files:
+                if not os.path.exists(f):
+                    raise CommandException("Reference file '{}' does not exist".format(f))
+            md5_fasta.extend(extra_fasta_files)
+        if mk_ref:
+            bgzip_bin = executables['bgzip']
+            if bgzip_bin == None:
+                raise CommandException("bgzip binary not found (should be bundled with the gemBS distribution)\n");
+            bgzip_command = [bgzip_bin]
+            if threads != None:
+                bgzip_command.extend(['-@', str(threads)]);
+            process = run_tools([md5_fasta,bgzip_command], name='md5_fasta', output = greference)
+            if process.wait() != 0:
+                for f in [greference, contig_md5]:
+                    if os.path.exists(f):
+                        os.remove(f)
+                raise ValueError("Error while making gemBS reference")
+        else:
+            process = run_tools([md5_fasta], name='md5_fasta', output = None)
+            if process.wait() != 0:
+                if os.path.exists(contig_md5):
+                    os.remove(contig_md5)
+                    raise ValueError("Error while making gemBS reference")
+        
+    process = run_tools([[executables['samtools'],'faidx',greference]], name='samtools faidx', output = None)
+    if process.wait() != 0:
+        for f in [greference + '.fai', greference + '.gzi']:
+            if os.path.exists(f):
+                os.remove(f)
+        raise ValueError("Error while making faidx index of gemBS reference")
+
+def mk_contig_md5(contig_md5, greference, populate_cache):
+    output_dir, base = os.path.split(contig_md5)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    md5 = [executables['md5_fasta'], '-o', contig_md5]
+    if populate_cache:
+        md5.append('-p')
+    md5.append(greference)
+    process = run_tools([md5], name='md5_fasta', output = None)
+    if process.wait() != 0:
+        if os.path.exists(contig_md5):
+            os.remove(contig_md5)
+        raise ValueError("Error while making contig md5 file")
+    return os.path.abspath(contig_md5)
+    
+def index(index_name, greference, threads=None,tmpDir=None,sampling_rate=None,nonbs_flag=False):
+    """Run the gem-indexer on the given gem reference.
     Output should be the path to the target index file. Note that
     the gem index has to end in .BS.gem and the prefix is added if necessary and
     the returned path will always be the correct path to the index.
@@ -534,36 +601,12 @@ def index(input_name, index_name, extra_fasta_files=None,threads=None,tmpDir=Non
     output_dir, base = os.path.split(index_name)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    if extra_fasta_files:
-        gcat = [executables['gemBS_cat'],input_name]
-        for f in extra_fasta_files:
-            if not os.path.exists(f):
-                raise CommandException("Reference file '{}' does not exist".format(f))
-            
-        gcat.extend(extra_fasta_files)
-        compress_bin = executables['pigz']
-        if compress_bin == None:
-            compress_bin = executables['gzip']
-        if compress_bin == None:
-            output = index_base + "_gemBS.tmp"
-            process = run_tools([gcat], name='gemBS_cat', output = output)
-        else:
-            output = index_base + "_gemBS.tmp.gz"
-            process = run_tools([gcat,[compress_bin]], name='gemBS_cat', output = output)
-        if process.wait() != 0:
-            if os.path.exists(output):
-                os.remove(output)
-            raise ValueError("Error while concatenating input fasta files")
-        f_in = output
-    else:
-        f_in = input_name
-           
     logfile = os.path.join(output_dir,"gem_indexer_" + base + ".err")
     logging.gemBS.gt("Creating index")
                            
     indexer = [
         executables['gem-indexer'],
-        '-i',f_in,
+        '-i',greference,
         '-o',index_base
     ]
 
@@ -584,13 +627,11 @@ def index(input_name, index_name, extra_fasta_files=None,threads=None,tmpDir=Non
     process = run_tools([indexer], name="gem-indexer", logfile=logfile)
         
     if process.wait() != 0:
-        for f in (f_in, index_base + '.gem', index_base + '.info', index_base + '.sa.tmp'):
-            if os.path.exists(f) and f != input_name:
+        for f in (index_base + '.gem', index_base + '.info', index_base + '.sa.tmp'):
+            if os.path.exists(f):
                 os.remove(f)
         raise ValueError("Error while executing the Bisulphite gem-indexer")
-    
-    if f_in != input_name:
-        os.remove(f_in)
+
     if index_name != index_base + ".gem":
         os.rename(index_base + ".gem", index_name)
         os.rename(index_base + ".info", index_name + ".info")
@@ -617,7 +658,7 @@ def dbSNP_index(list_dbSNP_files=[],dbsnp_index=""):
         tools = [db_snp_index]
         
         #Compress pipe            
-        compress_bin = executables['pigz']
+        compress_bin = executables['bgzip']
         if compress_bin == None:
             compress_bin = executables['gzip']
         if compress_bin != None:
@@ -628,12 +669,11 @@ def dbSNP_index(list_dbSNP_files=[],dbsnp_index=""):
         if process_dbsnp.wait() != 0:
             if os.path.isfile(dbsnp_index):
                 os.remove(dbsnp_index)
-            raise ValueError("Error while executing the dbSNP-indexer")
+            raise ValueError("Error while executing dbSNP-indexer")
     
     return os.path.abspath(dbsnp_index)
 
-def makeChromSizes(index_name=None,output=None):
-
+def makeChromSizes(index_name=None,output=None, omit=[]):
 
     index_base = index_name[:-4] if index_name.endswith('.gem') else index_name
     print(index_name, index_base)
@@ -652,16 +692,26 @@ def makeChromSizes(index_name=None,output=None):
                         if new_sz > sz: chrom_sizes[chr] = new_sz
                     else:
                         chrom_sizes[chr] = new_sz
+        for pattern in omit:
+            if pattern == "": continue
+            r = re.compile(fnmatch.translate(pattern))
+            for c in list(chrom_sizes.keys()):
+                if r.search(c):
+                    del chrom_sizes[c]
+    
         with open(output, "w") as f:
             for chr, size in [(c, chrom_sizes[c]) for c in sorted(chrom_sizes, key=chrom_sizes.get, reverse=True)]:
+                
                 f.write("{}\t{}\n".format(chr,size))
         return os.path.abspath(output)
     else:
         raise ValueError("Info file {} (normally generated by gem-indexer) does not exist".format(info_file))        
 
-def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
+def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,filetype=None,
              read_non_stranded=False,reverse_conv=False,outfile=None,
-             paired=False,tmpDir="/tmp",threads=1,under_conversion=None, over_conversion=None):
+             paired=False,tmpDir="/tmp",map_threads=None,sort_threads=None,
+             sort_memory=None,under_conversion=None, over_conversion=None,
+            benchmark_mode=False, contig_md5=None, greference=None):
     """ Start the GEM Bisulfite mapping on the given input.
     
     name -- Name basic (FLI) for the input and output fastq files
@@ -669,14 +719,19 @@ def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
     fliInfo -- FLI object with metadata information (useful for read groups)
     inputFiles -- List of input files
     ftype -- input file type
+    filetype -- output file type
     read_non_stranded -- Read non stranded
     reverse_conv - Reverse the normal conversion
     outputDir -- Directory to store the Bisulfite mapping results
     paired -- Paired End flag
     tmpDir -- Temporary directory to perform sorting operations
-    threads -- Number of threads
+    map_threads -- Number of threads for GEM mapper
+    sort_threads -- Number of threads for sort operation
+    sort_memory -- Per thread memory for sort operation
     under_conversion -- Under conversion sequence
     over_conversion -- Over conversion sequence
+    benchmark_mode -- Remove times etc. from output files to simplify file comparisons
+    contig_md5 -- File with md5 sums for all contigs
     """        
     ## prepare the input
     input_pipe = []  
@@ -691,7 +746,7 @@ def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
         mapping.extend(["--i1",inputFiles[0],"--i2",inputFiles[1]])
     elif len(inputFiles) == 1:
         if ftype in ['SAM', 'BAM']:
-            input_pipe.extend([executables['samtools'],"bam2fq", "--threads", str(threads), inputFiles[0]])
+            input_pipe.extend([executables['samtools'],"bam2fq", "--threads", str(map_threads), inputFiles[0]])
         elif ftype in ['COMMAND', 'SINGLE_COMMAND', 'PAIRED_COMMAND']:
             input_pipe.extend(['/bin/sh','-c',inputFiles[0]])            
         else:
@@ -708,9 +763,11 @@ def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
             mapping.extend(["--bisulfite-conversion","inferred-G2A-C2T"])
         else:
             mapping.extend(["--bisulfite-conversion","inferred-C2T-G2A"])
-    
+    #Benchmark mode
+    if benchmark_mode:
+        mapping.append("--benchmark-mode")
     #Number of threads
-    mapping.extend(["-t",threads])
+    mapping.extend(["-t",map_threads])
     #Mapping stats
     report_file = os.path.join(outputDir,"{}.json".format(name))
     logfile = os.path.join(outputDir,"gem_mapper_{}.err".format(name))
@@ -733,10 +790,22 @@ def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
     if over_conversion != "" and over_conversion != None:
         mapping.extend(["--overconversion_sequence",over_conversion])
     #READ FILTERING
-    readNameClean = [executables['readNameClean']]
+    readNameClean = [executables['readNameClean'], contig_md5]
          
     #BAM SORT
-    bamSort = [executables['samtools'],"sort","-T",os.path.join(tmpDir,name),"-@",threads,"-o",outfile,"-"]
+    bamSort = [executables['samtools'],"sort","-T",os.path.join(tmpDir,name),"-m",sort_memory,"-o",outfile]
+    if filetype == 'SINGLE_BAM':
+        bamSort.append("--write-index")
+    if benchmark_mode:
+        bamSort.append("--no-PG")
+    if outfile.endswith('.cram'):
+        bamSort.extend(['-O', 'CRAM', "-@", sort_threads]);
+        if not benchmark_mode:
+            bamSort.extend(['--reference', greference]);
+    else:
+        bamSort.extend(["-@", sort_threads]);
+        
+    bamSort.append('-');
     
     tools = [mapping,readNameClean,bamSort]
 
@@ -747,7 +816,7 @@ def mapping(name=None,index=None,fliInfo=None,inputFiles=None,ftype=None,
 
     return os.path.abspath("%s" % outfile)
 
-def merging(inputs=None,sample=None,threads="1",outname=None,tmpDir="/tmp/"):
+def merging(inputs=None,sample=None,threads="1",outname=None,tmpDir="/tmp/",benchmark_mode=False, greference=None):
     """ Merge bam alignment files 
     
         inputs -- Dictionary of samples and bam list files inputs(Key=sample, Value = [bam1,...,bamN])
@@ -761,7 +830,10 @@ def merging(inputs=None,sample=None,threads="1",outname=None,tmpDir="/tmp/"):
     output = os.path.dirname(outname)
         
     bam_filename = outname
-    index_filename = outname[:-3] + 'bai'
+    if outname.endswith('.cram'):
+        index_filename = outname[:-4] + 'crai'
+    else:
+        index_filename = outname[:-3] + 'csi'
     md5_filename = outname + '.md5'
     
     bammerging = []       
@@ -771,7 +843,17 @@ def merging(inputs=None,sample=None,threads="1",outname=None,tmpDir="/tmp/"):
 
     return_info = []
     if inputs:
-        bammerging.extend([executables['samtools'],"merge","--threads",threads,"-f",bam_filename])        
+        bammerging.extend([executables['samtools'],"merge","--write-index"])
+        if benchmark_mode:
+            bammerging.append("--no-PG")
+        if bam_filename.endswith('.cram'):
+            bammerging.extend(['-O', 'CRAM', '--threads', threads]);
+            if not benchmark_mode:
+                bammerging.extend(['--reference', greference]);
+        else:
+            bammerging.extend(['--threads', threads]);
+            
+        bammerging.extend(["-f",bam_filename])
         for bamFile in inputs:
             bammerging.append(bamFile)
         logfile = os.path.join(output,"bam_merge_{}.err".format(sample))
@@ -779,14 +861,8 @@ def merging(inputs=None,sample=None,threads="1",outname=None,tmpDir="/tmp/"):
         if process.wait() != 0: raise ValueError("Error while merging.")
         return_info.append(os.path.abspath(bam_filename))
     
-    #Samtools index
-    logfile = os.path.join(output,"bam_index_{}.err".format(sample))
-    indexing = [executables['samtools'], "index", "-@", threads, bam_filename, index_filename]
     md5sum = ['md5sum',bam_filename]
-    processIndex = run_tools([indexing],name="Indexing",logfile=logfile)
     processMD5 = run_tools([md5sum],name="BAM MD5",output=md5_filename)
-    if processIndex.wait() != 0:
-        raise ValueError("Error while indexing BAM file.")
     if processMD5.wait() != 0:
         raise ValueError("Error while calculating md5sum of BAM file.")
 
@@ -796,9 +872,9 @@ def merging(inputs=None,sample=None,threads="1",outname=None,tmpDir="/tmp/"):
 
 class BsCaller:
     def __init__(self,reference,species,right_trim=0,left_trim=5,keep_unmatched=False,
-                 keep_duplicates=False,ignore_duplicates=False,contig_size=None,dbSNP_index_file="",threads="1",
-                 mapq_threshold=None,bq_threshold=None,
-                 haploid=False,conversion=None,ref_bias=None,sample_conversion=None):
+                 keep_duplicates=False,ignore_duplicates=False,contig_size=None,csizes=None,dbSNP_index_file="",
+                 call_threads="1",merge_threads="1",mapq_threshold=None,bq_threshold=None,
+                 haploid=False,conversion=None,ref_bias=None,sample_conversion=None,benchmark_mode=False):
         self.reference = reference
         self.species = species
         self.right_trim = right_trim
@@ -807,7 +883,8 @@ class BsCaller:
         self.keep_duplicates = keep_duplicates
         self.ignore_duplicates = ignore_duplicates
         self.dbSNP_index_file = dbSNP_index_file
-        self.threads = threads
+        self.call_threads = call_threads
+        self.merge_threads = merge_threads
         self.mapq_threshold = mapq_threshold
         self.bq_threshold = bq_threshold
         self.haploid = haploid
@@ -815,6 +892,8 @@ class BsCaller:
         self.ref_bias = ref_bias
         self.sample_conversion = sample_conversion
         self.contig_size = contig_size
+        self.csizes = csizes
+        self.benchmark_mode = benchmark_mode
 
     def prepare(self, sample, input_bam, chrom_list, output_bcf, report_file, contig_bed):
 
@@ -822,19 +901,18 @@ class BsCaller:
             for chrom in chrom_list:
                 f.write("{}\t0\t{}\n".format(chrom, str(self.contig_size[chrom])))
                         
-        samtools = [executables['samtools'],'view','-L',contig_bed,'-h',input_bam]
-        bsCall = [samtools]
-
-        parameters_bscall = ['%s' %(executables["bs_call"]),'-r',self.reference,'-n',sample,'--contig-bed',contig_bed,'--report-file',report_file]
+        parameters_bscall = ['%s' %(executables["bs_call"]),'-r',self.reference,'-n',sample,'--contig-bed',contig_bed,'--contig-sizes',self.csizes,'--report-file',report_file]
     
         parameters_bscall.extend(['--right-trim', str(self.right_trim), '--left-trim', str(self.left_trim)])
-            
+        
         if self.keep_unmatched:
             parameters_bscall.append('-k')
         if self.keep_duplicates:
             parameters_bscall.append('-d')
         if self.ignore_duplicates:
             parameters_bscall.append('--ignore-duplicates')
+        if self.benchmark_mode:
+            parameters_bscall.append('--benchmark-mode')
         if self.haploid:
             parameters_bscall.append('-1')
         if self.conversion != None:
@@ -844,17 +922,24 @@ class BsCaller:
                 parameters_bscall.extend(['--conversion', self.conversion])
         if self.ref_bias != None:
             parameters_bscall.extend(['--reference-bias', self.ref_bias])
-        #Thresholds
+        # Thresholds
         if self.mapq_threshold != None:
             parameters_bscall.extend(['--mapq-threshold', self.mapq_threshold])
         if self.bq_threshold != None:
             parameters_bscall.extend(['--bq-threshold', self.bq_threshold])
+        # Threads
+        parameters_bscall.extend(['-t', self.call_threads])
+        # dbSNP
         if self.dbSNP_index_file:
             parameters_bscall.extend(['-D', self.dbSNP_index_file])
+        # Output
+        parameters_bscall.extend(['-O', 'b', '-o', output_bcf]);
+        
+        # Input BAM file
+        
+        parameters_bscall.append(input_bam);
     
-        bsCall.append(parameters_bscall)
-                
-        bsCall.append([executables['bcftools'],'convert','-o',output_bcf,'-O','b','--threads',self.threads])
+        bsCall = [parameters_bscall]
         return bsCall
 
 class MethylationCallIter:
@@ -891,7 +976,7 @@ class MethylationCallIter:
             mrg_file = ""
             mrg_ok = False if self.no_merge else True
             list_bcfs = []
-            for fname, pool, ftype, status in c.execute("SELECT filepath, poolid, type, status FROM calling WHERE sample = ?", (sample,)):
+            for fname, pool, ftype, status in c.execute("SELECT filepath, poolid, type, status FROM calling WHERE sample = ? ORDER BY poolsize DESC", (sample,)):
                 if self.ignore_db:
                     status = self.status.get(fname, 0)
                 if ftype == 'POOL_BCF':
@@ -945,7 +1030,7 @@ class MethylationCallIter:
         db.close()
           
 class MethylationCallThread(th.Thread):
-    def __init__(self, threadID, methIter, bsCall, lock, remove, dry_run_com, dry_run, dry_run_json, json_commands, conversion, sample_conversion):
+    def __init__(self, threadID, methIter, bsCall, lock, remove, dry_run_com, dry_run, dry_run_json, json_commands, conversion, sample_conversion, benchmark_mode):
         th.Thread.__init__(self)
         self.threadID = threadID
         self.methIter = methIter
@@ -958,6 +1043,7 @@ class MethylationCallThread(th.Thread):
         self.json_commands = json_commands
         self.conversion = conversion
         self.sample_conversion = sample_conversion
+        self.benchmark_mode = benchmark_mode
 
     def run(self):
         while True:
@@ -1030,19 +1116,19 @@ class MethylationCallThread(th.Thread):
                         self.json_commands[desc]=task
                 
                 else:
-                    bsConcat(list_bcfs, sample, fname)
-                self.lock.acquire()
-                if self.remove:
-                    self.methIter.finished(list_bcfs, fname)
-                else:
-                    self.methIter.finished(None, fname)
-                self.lock.release()
+                    bsConcat(list_bcfs, sample, self.bsCall.merge_threads, fname, self.benchmark_mode)
+                    self.lock.acquire()
+                    if self.remove:
+                        self.methIter.finished(list_bcfs, fname)
+                    else:
+                        self.methIter.finished(None, fname)
+                    self.lock.release()
                 
                 
 def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=None,samples=None,right_trim=0,left_trim=5,dry_run_com=None,
-                       keep_unmatched=False,keep_duplicates=False,dbSNP_index_file="",threads="1",jobs=1,remove=False,concat=False,
+                       keep_unmatched=False,keep_duplicates=False,dbSNP_index_file="",call_threads="1",merge_threads="1",jobs=1,remove=False,concat=False,
                        mapq_threshold=None,bq_threshold=None,haploid=False,conversion=None,ref_bias=None,sample_conversion=None,
-                       no_merge=False,json_commands=None,dry_run=False,dry_run_json=None,ignore_db=None,ignore_duplicates=False):
+                       no_merge=False,json_commands=None,dry_run=False,dry_run_json=None,ignore_db=None,ignore_duplicates=False,benchmark_mode=False):
 
     """ Performs the process to make met5Bhylation calls.
     
@@ -1058,7 +1144,8 @@ def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=No
     keep_duplicates -- Do not merge duplicate reads  
     ignore_duplicates -- Ignore duplicate flag from SAM/BAM files
     dbSNP_index_file -- dbSNP Index File            
-    threads -- Number of threads
+    call_threads -- Number of threads for calling process
+    merge_threads -- Number of threads for merging process
     mapq_threshold -- threshold for MAPQ scores
     bq_threshold -- threshold for base quality scores
     haploid -- force genotypes to be homozygous
@@ -1066,8 +1153,9 @@ def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=No
     remove -- remove individual BCF files after merging
     ref_bias -- bias to reference homozygote
     sample_conversion - per sample conversion rates (calculated if conversion == 'auto')
+    benchmark_mode - remove version and date information from header
     """
-    
+
     for snp, pl in output_bcf.items():
         for v in pl:
             odir = os.path.dirname(v[0])
@@ -1081,17 +1169,18 @@ def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=No
     ret = c.fetchone()
     if not ret or ret[2] != 1:
         raise CommandException("Could not open contig sizes file.")
+    csizes = ret[0]
     contig_size = {}
-    with open (ret[0], "r") as f:
+    with open (csizes, "r") as f:
         for line in f:
             fd = line.split()
             if(len(fd) > 1):
                 contig_size[fd[0]] = int(fd[1])
 
     bsCall = BsCaller(reference=reference,species=species,right_trim=right_trim,left_trim=left_trim,
-                      keep_unmatched=keep_unmatched,keep_duplicates=keep_duplicates,ignore_duplicates=ignore_duplicates,contig_size=contig_size,
-                      dbSNP_index_file=dbSNP_index_file,threads=threads,mapq_threshold=mapq_threshold,bq_threshold=bq_threshold,
-                      haploid=haploid,conversion=conversion,ref_bias=ref_bias,sample_conversion=sample_conversion)
+                      keep_unmatched=keep_unmatched,keep_duplicates=keep_duplicates,ignore_duplicates=ignore_duplicates,contig_size=contig_size,csizes=csizes,
+                      dbSNP_index_file=dbSNP_index_file,call_threads=call_threads,merge_threads=merge_threads,mapq_threshold=mapq_threshold,bq_threshold=bq_threshold,
+                      haploid=haploid,conversion=conversion,ref_bias=ref_bias,sample_conversion=sample_conversion,benchmark_mode=benchmark_mode)
 
     if dry_run_com != None:
         jobs = 1
@@ -1101,7 +1190,7 @@ def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=No
     if jobs < 1: jobs = 1
     thread_list = []
     for ix in range(jobs):
-        thread = MethylationCallThread(ix, methIter, bsCall, lock, remove, dry_run_com, dry_run, dry_run_json, json_commands, conversion, sample_conversion)
+        thread = MethylationCallThread(ix, methIter, bsCall, lock, remove, dry_run_com, dry_run, dry_run_json, json_commands, conversion, sample_conversion, benchmark_mode)
         thread.start()
         thread_list.append(thread)
     for thread in thread_list:
@@ -1109,9 +1198,9 @@ def methylationCalling(reference=None,species=None,sample_bam=None,output_bcf=No
     return " ".join(list(sample_bam.keys()))
 
             
-def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=False,cpg=False,non_cpg=False,allow_het=False,
+def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=False,bw_strand_specific=False,cpg=False,non_cpg=False,allow_het=False,
                          inform=1,phred=20,min_nc=1,bedMethyl=False,bigWig=False,contig_list=None,contig_size_file=None,
-                         snps=None,snp_list=None,snp_db=None,ref_bias=None):
+                         snps=None,snp_list=None,snp_db=None,ref_bias=None,extract_threads=None):
     
     """ Filters bcf methylation calls file 
 
@@ -1132,9 +1221,9 @@ def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=Fal
         for ctg, size in contig_list:
             f.write("{}\t0\t{}\n".format(ctg, size))
 
-    bcftools = [executables['bcftools'],'view','-R',contig_bed,'-Ou',bcfFile]
-    mextr_com = [executables['bcftools'],'+mextr','--','-z']
-    mextr = []
+    mextr = [executables['mextr'], '-z', '--md5', '-R', contig_bed]
+    if extract_threads:
+        mextr.extend(['-@', extract_threads])
     if ref_bias:
         mextr.extend(['--reference-bias', ref_bias])       
     if cpg:
@@ -1143,34 +1232,31 @@ def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=Fal
         mextr.extend(['--noncpgfile', outbase + '_non_cpg.txt', '--min-nc', str(min_nc)])
     if bedMethyl:
         mextr.extend(['-b', outbase])
-    if bigWig:
-        mextr.extend(['-w', '-'])
-        wig2bigwig = [executables['wigToBigWig'], '/dev/stdin', contig_size_file, outbase + '.bw']
         
     if cpg or non_cpg:
-        mextr.extend(['--inform',str(inform),'--threshold',str(phred)])
+        mextr.extend(['--inform',str(inform),'--threshold',str(phred),'--tabix'])
     if strand_specific:
         mextr.extend(['--mode', 'strand-specific'])
+    if bw_strand_specific:
+        mextr.extend(['--bw-mode', 'strand-specific'])
     if allow_het:
         mextr.extend(['--select', 'het'])
-
-    if mextr:
-        mextr_com.extend(mextr)
-        pipeline = [bcftools, mextr_com]
-        if bigWig:
-            pipeline.append(wig2bigwig)
-        
-        logfile = os.path.join(output_dir,"mextr_{}.err".format(name))
-        process = run_tools(pipeline, name="Methylation Extraction", logfile=logfile)
+    mextr.append(bcfFile);
+    logfile = os.path.join(output_dir,"mextr_{}.err".format(name))
+    process = run_tools([mextr], name="Methylation Extraction", logfile=logfile)
 
     if snps:
-        snpxtr = [executables['bcftools'],'+snpxtr','--','-z','-o',outbase + '_snps.txt.gz']
+        snpxtr = [executables['snpxtr'],'-zmx','-o',outbase + '_snps.txt.gz']
         if snp_list:
             snpxtr.extend(['-s',snp_list])
         if snp_db:
             snpxtr.extend(['-D',snp_db])
+        if extract_threads:
+            snpxtr.extend(['-@', extract_threads])
+
+        snpxtr.append(bcfFile);
         snp_logfile = os.path.join(output_dir,"snpxtr_{}.err".format(name))
-        process_snp = run_tools([bcftools, snpxtr], name="SNP Extraction",logfile=snp_logfile)
+        process_snp = run_tools([snpxtr], name="SNP Extraction",logfile=snp_logfile)
         if process_snp.wait() != 0:
             raise ValueError("Error while extracting SNP calls.")
 
@@ -1180,77 +1266,9 @@ def methylationFiltering(bcfFile=None,outbase=None,name=None,strand_specific=Fal
 
     os.remove(contig_bed)
 
-    # Now generate indexes and bigBed files if required
-    if cpg:
-        tfile = "{}_cpg.txt.gz.tbi".format(outbase)
-        if os.path.exists(tfile):
-            os.remove(tfile)
-        logfile = os.path.join(output_dir,"tabix_{}_cpg.err".format(name))
-        tabix = [executables['tabix'], '-p', 'bed', '-S', '1', "{}_cpg.txt.gz".format(outbase)]
-        cpg_idx_proc = run_tools([tabix],name="Index Methylation CpG files", logfile=logfile)
-
-    if snps:
-        tfile = "{}_snp.txt.gz.tbi".format(outbase)
-        if os.path.exists(tfile):
-            os.remove(tfile)
-        logfile = os.path.join(output_dir,"tabix_{}_snps.err".format(name))
-        tabix = [executables['tabix'], '-S', '1', '-s' '1', '-b', '2', '-e', '2', "{}_snps.txt.gz".format(outbase)]
-        snp_idx_proc = run_tools([tabix],name="Index SNP files", logfile=logfile)
-        
-    if non_cpg:
-        tfile = "{}_non_cpg.txt.gz.tbi".format(outbase)
-        if os.path.exists(tfile):
-            os.remove(tfile)
-        logfile = os.path.join(output_dir,"tabix_{}_non_cpg.err".format(name))
-        tabix = [executables['tabix'], '-p', 'bed', '-S', '1', "{}_non_cpg.txt.gz".format(outbase)]
-        non_cpg_idx_proc = run_tools([tabix],name="Index Methylation non-CpG files", logfile=logfile)
-
-    if bedMethyl:
-        if pkg_resources.resource_exists("gemBS", "etc"):
-            etc_dir = pkg_resources.resource_filename("gemBS", "etc")
-        else:
-            raise CommandException("Couldn't locate gemBS etc directory")
-        
-        bm_proc = []
-        bm_tfile = []
-        for x in ('cpg', 'chg', 'chh'):
-            bfile = "{}_{}.bed.gz".format(outbase, x)
-            unzip = [executables['bgzip'], '-cd', bfile]
-
-            sed = ['sed', '1d']
-            ofile = "{}_{}.bed.tmp".format(outbase,x)
-            p = run_tools([unzip, sed],name='Make temp bed9+5 file',output=ofile)
-            bm_proc.append(p)
-            bm_tfile.append(ofile)
-        for p in bm_proc:
-            if p.wait() != 0:
-                raise ValueError("Error while uncompressing bed9+5 files.")
-        bm_proc = []
-        for ix, x in enumerate(['cpg', 'chg', 'chh']):
-            bed2bb = [executables['bedToBigBed'], '-type=bed9+5',"-as={}/bed9_5.as".format(etc_dir), '-tab', bm_tfile[ix],
-                      contig_size_file, "{}_{}.bb".format(outbase,x)]
-            logfile = os.path.join(output_dir,"bedToBigWig_{}_{}.err".format(name,x))
-            p = run_tools([bed2bb], name='Make bigBed file',logfile=logfile)
-            bm_proc.append(p)
-            
-    if cpg:
-        if cpg_idx_proc.wait() != 0:
-            raise ValueError("Error while indexing CpG calls.")
-    if non_cpg:
-        if non_cpg_idx_proc.wait() != 0:
-            raise ValueError("Error while indexing non-CpG calls.")
-    if bedMethyl:
-        for ix, p in enumerate(bm_proc):
-            if p.wait() != 0:
-                raise ValueError("Error while making bigBed files.")
-            os.remove(bm_tfile[ix])
-    if snps:
-        if snp_idx_proc.wait() != 0:
-            raise ValueError("Error while indexing SNP calls.")
-        
     return os.path.abspath(output_dir)
 
-def bsConcat(list_bcfs=None,sample=None,bcfSample=None):
+def bsConcat(list_bcfs=None,sample=None,threads=None,bcfSample=None,benchmark_mode=False):
     """ Concatenates all bcf methylation calls files in one output file.
     
         list_bcfs -- list of bcf files to be concatenated
@@ -1268,7 +1286,12 @@ def bsConcat(list_bcfs=None,sample=None,bcfSample=None):
     logfile = os.path.join(output_dir,"bcf_concat_{}.err".format(sample))
    
     #Concatenation
-    concat = [executables['bcftools'],'concat','-O','b','-o',bcfSample]
+    concat = [executables['bcftools'],'concat','-O','b','-n','-o',bcfSample]
+    if threads != None:
+        concat.extend(['--threads', threads])
+    if benchmark_mode:
+        concat.append('--no-version')
+    list_bcfs.sort()
     concat.extend(list_bcfs)
      
     process = run_tools([concat],name="Concatenation Calls",logfile=logfile)
@@ -1276,7 +1299,11 @@ def bsConcat(list_bcfs=None,sample=None,bcfSample=None):
         raise ValueError("Error while concatenating bcf calls.")
         
     #Indexing
-    indexing = [executables['bcftools'],'index',bcfSample]
+    indexing = [executables['bcftools'],'index']
+    if threads != None:
+        indexing.extend(['--threads', threads])
+    indexing.append(bcfSample)
+
     #md5sum
     md5sum = ['md5sum',bcfSample]
 

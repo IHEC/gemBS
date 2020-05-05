@@ -72,7 +72,7 @@ static void add_bias(double *ll, char rf, double ref_bias) {
 // This function is taken from genotype_model.c in bs_call
 // As far as possible the two functions should be kept in sync
 // (Yes, a shared library would make more sense...to do)
-void calc_gt_prob(gt_meth *gt, args_t *args, char rf) {
+void calc_gt_prob(gt_meth *gt, args_t *const args, char rf) {
   qual_prob qp[8];
   for(int i = 0; i < 8; i++)  qp[i] = q_prob[gt->aqual[i]];
   double l = 1.0 - args->under_conv;
@@ -249,7 +249,7 @@ double get_meth(gt_meth *g, int idx) {
 // Calculate combined methylation for a CpG using information from both strands
 // if available, taking account of the called genotypes.  If information is not
 // available from both strands, use the single site estimate of methylation
-void calc_cpg_meth(args_t *args, int ns, cpg_prob *cpg, gt_meth *g1, gt_meth *g2) {
+void calc_cpg_meth(args_t *const args, int ns, cpg_prob *cpg, gt_meth *g1, gt_meth *g2) {
   double wval[3] = {1.0, 1.0, 0.5};
   double pval[3] = {1.0, 0.5, 1.0};
   for(int ix = 0; ix < ns; ix++) {

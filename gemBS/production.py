@@ -62,7 +62,7 @@ Input Files:
   Two files are required, a configuration file describing the model parameters and analysis directory
   structure, and second file describing the sample metadata and associated data files.
 
-  The sample file will normally be a text file in CSV format with an optional (although recommended) header line,
+  The sample file will normally be a text file in CSV format with a  header line,
   although there is also the option to import a JSON file from the CNAG LIMS.
 
   A full description of the input file formats can be found in the gemBS documentation.  
@@ -140,7 +140,8 @@ class Index(BasicPipeline):
     def register(self, parser):
         ## required parameters
         parser.add_argument('-t', '--threads', dest="threads", help='Number of threads. By default GEM indexer will use the maximum available on the system.',default=None)
-        parser.add_argument('-s', '--sampling-rate', dest="sampling_rate", help='Text sampling rate.  Increasing will decrease index size at the expense of slower mapping performance.',default=None)
+        parser.add_argument('-s', '--sampling-rate', dest="sampling_rate", help='Text sampling rate.  Increasing will decrease index size at the expense of slower  performance.',default=None)
+        parser.add_argument('-p', '--populate-cache', dest="populate_cache", help='Populate reference cache if required (for CRAM).',action="store_true",required=False,default=None)
         parser.add_argument('-d', '--list-dbSNP-files',dest="list_dbSNP_files",nargs="+",metavar="FILES",
                             help="List of dbSNP files (can be compressed) to create an index to later use it at the bscall step. The bed files should have the name of the SNP in column 4.",default=[])
 
@@ -157,28 +158,48 @@ class Index(BasicPipeline):
 
         fasta_input, fasta_input_ok = db_data['reference']
         extra_fasta_files = jsonData.check(section='index',key='extra_references',arg=None,list_type=True,default=[])
+        populate_cache = jsonData.check(section='index',key='populate_cache',arg=args.populate_cache, boolean=True)
         index_name, index_ok = db_data['index']
         nonbs_index_name, nonbs_index_ok = db_data.get('nonbs_index',(None, 0))
         csizes, csizes_ok = db_data['contig_sizes']
+        greference, greference_ok = db_data['gembs_reference']
+        contig_md5, contig_md5_ok = db_data['contig_md5']
+
+        # We trigger a regeneration of the contig_md5 file if we want to check/populate the cache
+        if populate_cache:
+            contig_md5_ok = False
         dbsnp_index, dbsnp_ok = db_data.get('dbsnp_idx',(None, 0))
         self.threads = jsonData.check(section='index',key='threads',arg=args.threads)
         args.sampling_rate = jsonData.check(section='index',key='sampling_rate',arg=args.sampling_rate)
         args.list_dbSNP_files = jsonData.check(section='index',key='dbsnp_files',arg=args.list_dbSNP_files,list_type=True,default=[])
         if not fasta_input: raise ValueError('No input reference file specified for Index command')
-            
+        if extra_fasta_files == []:
+            extra_fasta_files = None
+        if greference_ok == 1:
+            logging.warning("gemBS reference {} already exists, skipping creation".format(greference))
+        else:
+            ret = mk_gembs_reference(fasta_input, greference, contig_md5, extra_fasta_files=extra_fasta_files, threads=self.threads, populate_cache=populate_cache)
+            if ret:
+                self.command = 'mk_gembs_reference'
+                self.log_parameter()
+                
+                logging.gemBS.gt("gemBS reference done: {}".format(greference))
+                db.check_index()
+                if contig_md5 != None:
+                    logging.gemBS.gt("Contig md5 file created: {}".format(contig_md5))
+                    contig_md5_ok = True
+        
         if index_ok == 1:
             logging.warning("Bisulphite Index {} already exists, skipping indexing".format(index_name))
         else:
             self.command = 'index'
             self.log_parameter()
-        
-            ret = index(fasta_input, index_name, extra_fasta_files=extra_fasta_files, threads=self.threads, sampling_rate=args.sampling_rate, tmpDir=os.path.dirname(index_name))
+            ret = index(index_name, greference, threads=self.threads, sampling_rate=args.sampling_rate, tmpDir=os.path.dirname(index_name))
             if os.path.exists(csizes):
                 os.remove(csizes)
                 csizes_ok = 0
             if ret:
                 logging.gemBS.gt("Index done: {}".format(index))
-                db.check_index()
 
         if nonbs_index_name != None:
             if nonbs_index_ok == 1:
@@ -186,28 +207,32 @@ class Index(BasicPipeline):
             else:
                 self.command = 'nonbs index'
                 self.log_parameter()
-        
-                ret = index(fasta_input, nonbs_index_name, nonbs_flag=True, extra_fasta_files=extra_fasta_files, threads=self.threads, sampling_rate=args.sampling_rate, tmpDir=os.path.dirname(index_name))
+                ret = index(nonbs_index_name, greference, nonbs_flag=True, threads=self.threads, sampling_rate=args.sampling_rate, tmpDir=os.path.dirname(index_name))
                 if ret:
                     logging.gemBS.gt("Non-bisulfite index done: {}".format(index))
-
+        if not contig_md5_ok:
+            ret = mk_contig_md5(contig_md5, greference, populate_cache)
+            if ret:
+                logging.gemBS.gt("Contig md5 file created: {}".format(contig_md5))
         if dbsnp_index != None:
-            if args.list_dbSNP_files:
-                if dbsnp_ok:
-                    logging.warning("dbSNP Index {} already exists, skipping indexing".format(dbsnp_index))
-                else:
+            if dbsnp_ok:
+                logging.warning("dbSNP Index {} already exists, skipping indexing".format(dbsnp_index))
+            else:
+                if args.list_dbSNP_files:
                     ret = dbSNP_index(list_dbSNP_files=args.list_dbSNP_files,dbsnp_index=dbsnp_index)
                     if ret:
                         logging.gemBS.gt("dbSNP index done: {}".format(ret))
-            else:
-                raise CommandException("No inputs files for dbSNP index must be specified using the -d option or the dbsnp_files configuration key.")
+                else:
+                    raise CommandException("No input files for dbSNP index must be specified using the -d option or the dbsnp_files configuration key.")
         elif args.list_dbSNP_files:
             raise CommandException("The dbSNP Index file must be specified using the configuration parameter dbSNP_index.")
 
         if csizes_ok == 1:
             logging.warning("Contig sizes file {} already exists, skipping indexing".format(csizes))
         else:
-            ret = makeChromSizes(index_name, csizes)
+            config = jsonData.config
+            omit = config['calling'].get('omit_contigs', [])
+            ret = makeChromSizes(index_name, csizes, omit)
             if ret:
                 logging.gemBS.gt("Contig sizes file done: {}".format(ret))
                 db.check()
@@ -250,7 +275,11 @@ class Mapping(BasicPipeline):
         parser.add_argument('-n', '--sample-name', dest="sample_name", metavar="SAMPLE", help='Name of sample to be mapped.', required=False)
         parser.add_argument('-b', '--barcode', dest="sample", metavar="BARCODE", help='Barcode of sample to be mapped.', required=False)
         parser.add_argument('-d', '--tmp-dir', dest="tmp_dir", metavar="PATH", help='Temporary folder to perform sorting operations. Default: /tmp')      
-        parser.add_argument('-t', '--threads', dest="threads", help='Number of threads to perform sorting operations.')
+        parser.add_argument('-t', '--threads', dest="threads", help='Number of threads for the mapping pipeline. Default: 1');
+        parser.add_argument('--map-threads', dest="map_threads", help='Number of threads for GEM mapper. Default: threads',default=None)
+        parser.add_argument('--sort-threads', dest="sort_threads", help='Number of threads for the sort operations. Default: threads',default=None)
+        parser.add_argument('--merge-threads', dest="merge_threads", help='Number of threads for the merge operations. Default: threads',default=None)
+        parser.add_argument('--sort-memory', dest="sort_memory", help='Per thread memory used for the sort operation. Default: 768M',default=None)
         parser.add_argument('-T', '--type', dest="ftype", help='Type of data file (PAIRED, SINGLE, INTERLEAVED, STREAM, BAM)')
         parser.add_argument('-p', '--paired-end', dest="paired_end", action="store_true", help="Input data is Paired End")
         parser.add_argument('-r', '--remove', dest="remove", action="store_true", help='Remove individual BAM files after merging.', required=False)
@@ -264,6 +293,7 @@ class Mapping(BasicPipeline):
         parser.add_argument('--dry-run', dest="dry_run", action="store_true", help="Output mapping commands without execution")
         parser.add_argument('--json', dest="dry_run_json",metavar="JSON FILE",help="Output JSON file with details of pending commands")
         parser.add_argument('--ignore-db', dest="ignore_db", action="store_true",help="Ignore database for --dry-run and --json commands")
+        parser.add_argument('--benchmark-mode', dest="benchmark_mode", action="store_true",help="Omit dates etc. to make file comparison simpler", required=False)
                     
     def run(self, args):     
         self.all_types = ['PAIRED', 'INTERLEAVED', 'SINGLE', 'BAM', 'SAM', 'STREAM', 'PAIRED_STREAM', 'SINGLE_STREAM', 'COMMAND', 'SINGLE_COMMAND', 'PAIRED_COMMAND']
@@ -317,7 +347,12 @@ class Mapping(BasicPipeline):
         
         self.tmp_dir = self.jsonData.check(section='mapping',key='tmp_dir',arg=args.tmp_dir,dir_type=True)
         self.threads = self.jsonData.check(section='mapping',key='threads',arg=args.threads,default='1')
+        self.map_threads = self.jsonData.check(section='mapping',key='map_threads',arg=args.map_threads,default=self.threads)
+        self.sort_threads = self.jsonData.check(section='mapping',key='sort_threads',arg=args.sort_threads,default=self.threads)
+        self.merge_threads = self.jsonData.check(section='mapping',key='merge_threads',arg=args.merge_threads,default=self.threads)
+        self.sort_memory = self.jsonData.check(section='mapping',key='sort_memory',arg=args.sort_memory, default='768M')
         self.reverse_conv = self.jsonData.check(section='mapping',key='reverse_conversion',arg=args.reverse_conv, boolean=True)
+        self.benchmark_mode = self.jsonData.check(section='mapping',key='benchmark_mode',arg=args.benchmark_mode, boolean=True)
         self.read_non_stranded = self.jsonData.check(section='mapping',key='non_stranded',arg=args.read_non_stranded, boolean=True)
         if self.read_non_stranded:
             self.reverse_conv = False
@@ -326,7 +361,6 @@ class Mapping(BasicPipeline):
         self.overconversion_sequence = self.jsonData.check(section='mapping',key='overconversion_sequence',arg=args.overconversion_sequence)
 
         self.input_dir = self.jsonData.check(section='mapping',key='sequence_dir',arg=None,default='.',dir_type=True)
-
         self.db = database(self.jsonData)
         self.db.check_index()
         self.mem_db = self.db.mem_db()
@@ -340,7 +374,18 @@ class Mapping(BasicPipeline):
         for ix_type in ('index', 'nonbs_index'):
             c.execute("SELECT file, status FROM indexing WHERE type = '{}'".format(ix_type))
             self.index_status[ix_type] = c.fetchone()
-            
+        for fname, ftype, status in c.execute("SELECT * FROM indexing"):
+            if ftype == 'contig_md5':
+                if status != 1:
+                    raise CommandException("contig md5 file {} not found.  Run 'gemBS index' or correct configuration file and rerun".format(fname))
+                else:                
+                    self.contig_md5 = fname;
+            elif ftype == 'gembs_reference':
+                if status != 1:
+                    raise CommandException("gemBS reference {} not found.  Run 'gemBS index' or correct configuration file and rerun".format(fname))
+                else:
+                    self.fasta_reference = fname            
+        
         #Check Temp Directory
         if self.tmp_dir and not os.path.isdir(self.tmp_dir):
             raise CommandException("Temporary directory %s does not exists or is not a directory." %(self.tmp_dir))
@@ -532,9 +577,14 @@ class Mapping(BasicPipeline):
                 if args.paired_end: com.append('-p')
                 if args.remove: com.append('-r')
                 if args.threads: com.extend(['-t',args.threads])
+                if args.map_threads: com.extend(['--map-threads',args.map_threads])
+                if args.sort_threads: com.extend(['--sort-threads',args.sort_threads])
+                if args.merge_threads: com.extend(['--merge-threads',args.mere_threads])
+                if args.sort_memory: com.extend(['--sort-memory',args.sort_memory])
                 if args.tmp_dir: com.extend(['-d',args.tmp_dir])
                 if args.read_non_stranded: com.append('-s')
                 if args.reverse_conv: com.append('-R')
+                if args.benchmark_mode: com.append('--benchmark-mode')
                 if args.underconversion_sequence: com.extend(['-u',args.underconversion_sequence])
                 if args.overconversion_sequence: com.extend(['-v',args.overconversion_sequence])
                 if not bis: com.append('--non-bs')
@@ -558,10 +608,12 @@ class Mapping(BasicPipeline):
                 if not tmp:
                     tmp = os.path.dirname(outfile)
                     
-                ret = mapping(name=fli,index=self.index,fliInfo=fliInfo,inputFiles=inputFiles,ftype=ftype,
+                ret = mapping(name=fli,index=self.index,fliInfo=fliInfo,inputFiles=inputFiles,ftype=ftype,filetype=filetype,
                               read_non_stranded=self.read_non_stranded, reverse_conv=self.reverse_conv,
-                              outfile=outfile,paired=self.paired,tmpDir=tmp,threads=self.threads,
-                              under_conversion=self.underconversion_sequence,over_conversion=self.overconversion_sequence) 
+                              outfile=outfile,paired=self.paired,tmpDir=tmp,
+                              map_threads=self.map_threads,sort_threads=self.sort_threads,sort_memory=self.sort_memory,
+                              under_conversion=self.underconversion_sequence,over_conversion=self.overconversion_sequence,
+                              benchmark_mode=self.benchmark_mode, contig_md5=self.contig_md5, greference=self.fasta_reference) 
         
                 if ret:
                     logging.gemBS.gt("Bisulfite Mapping done. Output File: %s" %(ret))
@@ -578,6 +630,7 @@ class Mapping(BasicPipeline):
     
     def do_merge(self, sample, inputs, fname):
         if inputs:
+            inputs.sort()
             self.db.isolation_level = None
             c = self.db.cursor()
             try_get_exclusive(c)
@@ -595,7 +648,7 @@ class Mapping(BasicPipeline):
                         c.execute("COMMIT")
                         # Register output files and db cleanup in case of failure
                         odir = os.path.dirname(outfile)
-                        ixfile = os.path.join(odir, smp + '.bai')
+                        ixfile = os.path.join(odir, smp + '.csi')
                         md5file = outfile + '.md5'
                         database.reg_db_com(outfile, "UPDATE mapping SET status = 0 WHERE filepath = '{}'".format(outfile), [outfile, ixfile, md5file])
                         if self.dry_run or self.dry_run_json:
@@ -623,7 +676,8 @@ class Mapping(BasicPipeline):
                                 desc = "merge {}".format(smp)
                                 self.json_commands[desc] = task
                         else:
-                            ret = merging(inputs = inputs, sample = sample, threads = self.threads, outname = outfile)
+                            ret = merging(inputs = inputs, sample = sample, threads = self.merge_threads, outname = outfile,
+                                          benchmark_mode=self.benchmark_mode, greference=self.fasta_reference)
                             if ret:
                                 logging.gemBS.gt("Merging process done for {}. Output files generated: {}".format(sample, ','.join(ret)))
                                 
@@ -667,7 +721,7 @@ class Mapping(BasicPipeline):
                     desc = "merge {}".format(sample)
                     self.json_commands[desc] = task
             else:
-                ret = merging(inputs = [], sample = sample, threads = self.threads, outname = fname)
+                ret = merging(inputs = [], sample = sample, threads = self.merge_threads, outname = fname)
                 if ret:
                     logging.gemBS.gt("Merging process done for {}. Output files generated: {}".format(sample, ','.join(ret)))
 
@@ -719,6 +773,7 @@ class Merging(Mapping):
         parser.add_argument('--dry-run', dest="dry_run", action="store_true", help="Output mapping commands without execution")
         parser.add_argument('--json', dest="dry_run_json",metavar="JSON FILE",help="Output JSON file with details of pending commands")
         parser.add_argument('--ignore-db', dest="ignore_db", action="store_true",help="Ignore database for --dry-run and --json commands")
+        parser.add_argument('--benchmark-mode', dest="benchmark_mode", action="store_true",help="Omit dates etc. to make file comparison simpler", required=False)
         
     def run(self, args):
         self.command = 'merge-bams'
@@ -726,7 +781,9 @@ class Merging(Mapping):
         # JSON data
         self.jsonData = JSONdata(Mapping.gemBS_json)
         self.threads = self.jsonData.check(section='mapping',key='threads',arg=args.threads,default='1')
+        self.merge_threads = self.jsonData.check(section='mapping',key='merge_threads',arg=args.threads,default=self.threads)
         self.remove = self.jsonData.check(section='mapping',key='remove_individual_bams',arg=args.remove, boolean=True)
+        self.benchmark_mode = self.jsonData.check(section='mapping',key='benchmark_mode',arg=args.benchmark_mode, boolean=True)
         self.dry_run = args.dry_run
         self.dry_run_json = args.dry_run_json
         if self.dry_run or self.dry_run_json:
@@ -758,6 +815,13 @@ class Merging(Mapping):
             self.db.copy_to_mem()
 
         c = self.db.cursor()
+        for fname, ftype, status in c.execute("SELECT * FROM indexing"):
+            if ftype == 'gembs_reference':
+                if status != 1:
+                    raise CommandException("gemBS reference {} not found.  Run 'gemBS index' or correct configuration file and rerun".format(fname))
+                else:
+                    self.fasta_reference = fname            
+        
         if args.sample:
             ret = c.execute("SELECT * from mapping WHERE sample = ?", (args.sample,))
         else:
@@ -840,6 +904,8 @@ class MethylationCall(BasicPipeline):
         parser.add_argument('-g','--right-trim', dest="right_trim", metavar="BASES",type=int, help='Bases to trim from right of read pair, Default: 0')
         parser.add_argument('-f','--left-trim', dest="left_trim", metavar="BASES",type=int, help='Bases to trim from left of read pair, Default: 5')        
         parser.add_argument('-t','--threads', dest="threads", metavar="THREADS", help='Number of threads, Default: %s' %self.threads)
+        parser.add_argument('--call-threads', dest="call_threads", metavar="THREADS", help='Number of threads for calling process, Default: 1s')
+        parser.add_argument('--merge-threads', dest="merge_threads", metavar="THREADS", help='Number of threads for merging process, Default: threads')
         parser.add_argument('-j','--jobs', dest="jobs", type=int, help='Number of parallel jobs')
         parser.add_argument('-u','--keep-duplicates', dest="keep_duplicates", action="store_true", help="Do not merge duplicate reads.")    
         parser.add_argument('-U','--ignore_duplicate_flag', dest="ignore_duplicates", action="store_true", help="Ignore duplicate flag from SAM/BAM files.")    
@@ -857,6 +923,7 @@ class MethylationCall(BasicPipeline):
         parser.add_argument('--json', dest="dry_run_json",metavar="JSON FILE",help="Output JSON file with details of pending commands")
         parser.add_argument('--ignore-db', dest="ignore_db", action="store_true",help="Ignore database for --dry-run and --json commands")
         parser.add_argument('--ignore-dep', dest="ignore_dep", action="store_true",help="Ignore dependencies for --dry-run and --json commands")
+        parser.add_argument('--benchmark-mode', dest="benchmark_mode", action="store_true",help="Omit dates etc. to make file comparison simpler", required=False)
         
     def run(self,args):
         self.command = 'call'
@@ -874,6 +941,8 @@ class MethylationCall(BasicPipeline):
             return
                     
         self.threads = self.jsonData.check(section='calling',key='threads',arg=args.threads,default='1')
+        self.call_threads = self.jsonData.check(section='calling',key='call_threads',arg=args.threads,default=self.threads)
+        self.merge_threads = self.jsonData.check(section='calling',key='merge_threads',arg=args.threads,default=self.threads)
         self.jobs = self.jsonData.check(section='calling',key='jobs',arg=args.jobs,default=1,int_type=True)
         self.mapq_threshold = self.jsonData.check(section='calling',key='mapq_threshold',arg=args.mapq_threshold)
         self.qual_threshold = self.jsonData.check(section='calling',key='qual_threshold',arg=args.qual_threshold)
@@ -883,6 +952,7 @@ class MethylationCall(BasicPipeline):
         self.keep_unmatched = self.jsonData.check(section='calling',key='keep_improper_pairs',arg=args.keep_unmatched,boolean=True)
         self.keep_duplicates = self.jsonData.check(section='calling',key='keep_duplicates',arg=args.keep_duplicates,boolean=True)
         self.ignore_duplicates = self.jsonData.check(section='calling',key='ignore_duplicate_flag',arg=args.keep_duplicates,boolean=True)
+        self.benchmark_mode = self.jsonData.check(section='calling',key='benchmark_mode',arg=args.benchmark_mode, boolean=True)
         self.haploid = self.jsonData.check(section='calling',key='haploid',arg=args.haploid,boolean=True)
         self.species = self.jsonData.check(section='calling',key='species',arg=args.species)
         self.contig_list = self.jsonData.check(section='calling',key='contig_list',arg=args.contig_list,list_type=True, default = [])
@@ -919,7 +989,7 @@ class MethylationCall(BasicPipeline):
             if len(self.contig_list) == 1:
                 if os.path.isfile(self.contig_list[0]):
                     #Check if contig_list is a file or just a list of chromosomes
-                    #Parse file to extract chromosme list 
+                    #Parse file to extract chromosome list 
                     tmp_list = []
                     with open(self.contig_list[0] , 'r') as chromFile:
                         for line in chromFile:
@@ -988,9 +1058,9 @@ class MethylationCall(BasicPipeline):
         # Get fasta reference && dbSNP index if supplied
         self.dbSNP_index_file = None
         for fname, ftype, status in c.execute("SELECT * FROM indexing"):
-            if ftype == 'reference':
+            if ftype == 'gembs_reference':
                 if status != 1:
-                    raise CommandException("Fasta reference {} not found.  Run 'gemBS index' or correct configuration file and rerun".format(fname))
+                    raise CommandException("gemBS reference {} not found.  Run 'gemBS index' or correct configuration file and rerun".format(fname))
                 else:
                     self.fasta_reference = fname            
             elif ftype == 'dbsnp_idx':
@@ -1046,7 +1116,7 @@ class MethylationCall(BasicPipeline):
         mrg_bcf = {}
         for smp in sampleBam:
             ind_bcf[smp] = []
-        for fname, pool, smp, ftype, status in c.execute("SELECT * from calling"):
+        for fname, pool, smp, psize, ftype, status in c.execute("SELECT * from calling"):
             if self.ignore_db:
                 status = 0
             if smp in sampleBam:
@@ -1102,6 +1172,8 @@ class MethylationCall(BasicPipeline):
                         com.extend(['-j',Mapping.gemBS_json])
                 com1 = []
                 if args.threads != None: com1.extend(['-t',args.threads])
+                if args.call_threads != None: com1.extend(['--call-threads',args.call_threads])
+                if args.merge_threads != None: com1.extend(['--merge-threads',args.merge_threads])
                 if args.remove != None: com1.append('-r')
                 com2 = []
                 if args.mapq_threshold != None: com2.extend(['-q',str(args.mapq_threshold)])
@@ -1114,6 +1186,7 @@ class MethylationCall(BasicPipeline):
                 if args.keep_unmatched != None: com2.append('-k')
                 if args.haploid != None: com2.append('--haploid')
                 if args.species != None: com2.append('--species')
+                if args.benchmark_mode: com.append('--benchmark-mode')
                 if args.ref_bias != None: com2.extend(['-B',args.ref_bias])
                 dry_run_com = [com, com1, com2]
                 
@@ -1129,9 +1202,10 @@ class MethylationCall(BasicPipeline):
                                      sample_bam=self.sampleBam,output_bcf=self.outputBcf,remove=self.remove,dry_run=self.dry_run,
                                      keep_unmatched=self.keep_unmatched,samples=self.samples,dry_run_com=dry_run_com,
                                      keep_duplicates=self.keep_duplicates,ignore_duplicates=self.ignore_duplicates,
-                                     dbSNP_index_file=self.dbSNP_index_file,threads=self.threads,jobs=self.jobs,
+                                     dbSNP_index_file=self.dbSNP_index_file,call_threads=self.call_threads,merge_threads=self.merge_threads,jobs=self.jobs,
                                      mapq_threshold=self.mapq_threshold,bq_threshold=self.qual_threshold,dry_run_json=self.dry_run_json,
-                                     haploid=self.haploid,conversion=self.conversion,ref_bias=self.ref_bias,sample_conversion=self.sample_conversion)
+                                     haploid=self.haploid,conversion=self.conversion,ref_bias=self.ref_bias,sample_conversion=self.sample_conversion,
+                                     benchmark_mode=self.benchmark_mode)
                 
             if ret and not (self.dry_run or self.dry_run_json):
                 if args.concat:
@@ -1186,12 +1260,14 @@ class BsCallConcatenate(MethylationCall):
         parser.add_argument('-n', '--sample-name',dest="sample_name",metavar="SAMPLE",help="Nmae of sample to be merged",required=False)
         parser.add_argument('-b', '--sample-barcode',dest="sample",metavar="BARCODE",help="Barcode of sample to be merged",required=False)
         parser.add_argument('-t', '--threads', dest="threads", metavar="THREADS", help='Number of threads')
+        parser.add_argument('--merge-threads', dest="merge_threads", metavar="THREADS", help='Number of threads for merge step')
         parser.add_argument('-r', '--remove', dest="remove", action="store_true", help='Remove individual BAM files after merging.', required=False)
         parser.add_argument('-j', '--jobs', dest="jobs", type=int, help='Number of parallel jobs')
         parser.add_argument('--dry-run', dest="dry_run", action="store_true", help="Output mapping commands without execution")
         parser.add_argument('--json', dest="dry_run_json",metavar="JSON FILE",help="Output JSON file with details of pending commands")
         parser.add_argument('--ignore-db', dest="ignore_db", action="store_true",help="Ignore database for --dry-run and --json commands")
         parser.add_argument('--ignore-dep', dest="ignore_dep", action="store_true",help="Ignore dependencies for --dry-run and --json commands")
+        parser.add_argument('--benchmark-mode', dest="benchmark_mode", action="store_true",help="Omit dates etc. to make file comparison simpler", required=False)
     
     def run(self,args):
 
@@ -1211,6 +1287,7 @@ class BsCallConcatenate(MethylationCall):
         args.dbSNP_index_file = None
         args.pool = None
         args.list_pools = 0
+        args.call_threads = None
         args.no_merge = False
         MethylationCall.run(self, args)
       
@@ -1249,11 +1326,11 @@ class MethylationFiltering(BasicPipeline):
 
   A second set of extracted outputs that correspond to the ENCODE WGBS pipeline are also available using the --bed-methyl and --bigwig options.
   The --bed-methyl option will produce three files per sample for all covered sites in CpG, CHG and CHH context in BED9+5 format.  Each of 
-  the files will also be generated in bigBed format for display in genome browsers.  The --bigwig option will produce a bigWig file giving
-  the methylation percentage at all covered cytosine sites (informative coverage > 0).  For the ENCODE output files, not further filtering 
-  is performed.
+  the files will also be generated in bigBed format for display in genome browsers.  In addition a bigWig format file will be generated giving
+  the methylation percentage at all covered cytosine sites (informative coverage > 0).  If the --strand-specific option is given then two bigWig
+  files will be geenrated - one for each strand.  For the ENCODE output files, not further filtering is performed.
 
-  In addition to the methylation result, SNP genotypes can also be extract with the --snps options.  By default, this will return a file
+  In addition to the methylation result, SNP genotypes can also be extracted with the --snps options.  By default, this will return a file
   with genotypes on all SNPs covered by the experiment that were in the dbSNP_idx file used for the calling stage.  This selection can
   be refined uwing the --snp-list option, which is a file with a list of SNP ids, one id per line.  An alternate dbSNP_idx file can also be supplied
   using the --snp-db option, allowing SNPs that were not in the original dbSNP_idx file used for calling to be extracted.
@@ -1272,7 +1349,8 @@ class MethylationFiltering(BasicPipeline):
         parser.add_argument('-j','--jobs', dest="jobs", type=int, help='Number of parallel jobs')
         parser.add_argument('-n','--sample-name',dest="sample_name",metavar="SAMPLE_NAME",help="Name of sample to be filtered")  
         parser.add_argument('-b','--barcode',dest="sample",metavar="SAMPLE_BARCODE",help="Barcode of sample to be filtered")  
-        parser.add_argument('-s','--strand-specific', dest="strand_specific", action="store_true", default=False, help="Output separate lines for each strand.")
+        parser.add_argument('-s','--strand-specific', dest="strand_specific", action="store_true", default=False, help="Output separate lines in CpG file for each strand.")
+        parser.add_argument('-W','--bigwig-strand-specific', dest="bw_strand_specific", action="store_true", default=False, help="Output separate bigWig files for each strand.")
         parser.add_argument('-q','--phred-threshold', dest="phred", help="Min threshold for genotype phred score.")
         parser.add_argument('-I','--min-inform', dest="inform", help="Min threshold for informative reads.")
         parser.add_argument('-M','--min-nc', dest="min_nc", help="Min threshold for non-converted reads for non CpG sites.")
@@ -1281,8 +1359,8 @@ class MethylationFiltering(BasicPipeline):
         parser.add_argument('-c','--cpg', dest="cpg", action="store_true", help="Output gemBS bed with cpg sites.")
         parser.add_argument('-N','--non-cpg', dest="non_cpg", action="store_true", help="Output gemBS bed with non-cpg sites.")
         parser.add_argument('-B','--bed-methyl', dest="bedMethyl", action="store_true", help="Output bedMethyl files (bed and bigBed)")
-        parser.add_argument('-w','--bigwig', dest="bigWig", action="store_true", help="Output bigWig file")
         parser.add_argument('-S','--snps', dest="snps", action="store_true",help="Output SNPs")
+        parser.add_argument('-t','--extract-threads', dest="extract_threads", metavar="THREADS", help='Number of extra threads for extract step')
         parser.add_argument('--snp-list', dest="snp_list", help="List of SNPs to output")
         parser.add_argument('--snp-db', dest="snp_db", help="dbSNP_idx processed SNP idx")
         parser.add_argument('--dry-run', dest="dry_run", action="store_true", help="Output mapping commands without execution")
@@ -1296,6 +1374,8 @@ class MethylationFiltering(BasicPipeline):
         # JSON data
         self.jsonData = JSONdata(Mapping.gemBS_json)
 
+        self.threads = self.jsonData.check(section='extract',key='threads')
+        self.extract_threads = self.jsonData.check(section='extract',key='extract_threads',arg=args.extract_threads,default=self.threads)
         self.jobs = self.jsonData.check(section='extract',key='jobs',arg=args.jobs,default=1,int_type=True)
         self.allow_het = self.jsonData.check(section='extract',key='allow_het',arg=args.allow_het,boolean=True,default=False)
         self.cpg = self.jsonData.check(section='extract',key='make_cpg',arg=args.cpg,boolean=True,default=False)
@@ -1305,8 +1385,9 @@ class MethylationFiltering(BasicPipeline):
         self.non_cpg = self.jsonData.check(section='extract',key='make_non_cpg',arg=args.non_cpg,boolean=True,default=False)
         self.bedMethyl = self.jsonData.check(section='extract',key='make_bedmethyl',arg=args.bedMethyl,boolean=True,default=False)
         self.ref_bias = self.jsonData.check(section='extract',key='reference_bias',arg=args.ref_bias)
-        self.bigWig = self.jsonData.check(section='extract',key='make_bigwig',arg=args.bigWig,boolean=True,default=False)
+#        self.bigWig = self.jsonData.check(section='extract',key='make_bigwig',arg=args.bigWig,boolean=True,default=False)
         self.strand_specific = self.jsonData.check(section='extract',key='strand_specific',arg=args.strand_specific,boolean=True,default=False)
+        self.bw_strand_specific = self.jsonData.check(section='extract',key='bigwig_strand_specific',arg=args.bw_strand_specific,boolean=True,default=False)
         self.phred = self.jsonData.check(section='extract',key='phred_threshold',arg=args.phred, default = '20')
         self.inform = self.jsonData.check(section='extract',key='min_inform',arg=args.inform, default = 1, int_type=True)
         self.min_nc = self.jsonData.check(section='extract',key='min_nc',arg=args.inform, default = 1, int_type=True)
@@ -1334,7 +1415,7 @@ class MethylationFiltering(BasicPipeline):
         if self.cpg: self.mask |= 3
         if self.non_cpg: self.mask |= 12
         if self.bedMethyl: self.mask |= 48
-        if self.bigWig: self.mask |= 192
+#        if self.bigWig: self.mask |= 192
         if self.snps: self.mask |= 768
         self.mask1 = self.mask & 341
         
@@ -1434,21 +1515,24 @@ class MethylationFiltering(BasicPipeline):
                 cpg, non_cpg, bigWig, bedMethyl, snps = (False, False, False, False, False)
                 if self.cpg and not (sm & 3):
                     cpg = True
-                    files.extend([filebase + '_cpg.txt.gz', filebase + '_cpg.txt.gz.tbi'])
+                    files.extend([filebase + '_cpg.txt.gz', filebase + '_cpg.txt.gz.tbi', filebase + '_cpg.txt.gz.md5'])
                 if self.non_cpg and not (sm & 12):
                     non_cpg = True
-                    files.extend([filebase + '_non_cpg.txt.gz', filebase + '_non_cpg.txt.gz.tbi'])
-                if self.bigWig and not (sm & 48):
-                    bigWig = True
-                    files.append(filebase + '.bw')
+                    files.extend([filebase + '_non_cpg.txt.gz', filebase + '_non_cpg.txt.gz.tbi', filebase + '_non_cpg.txt.gz.md5'])
                 if self.bedMethyl and not (sm & 192):
                     bedMethyl = True
-                    for x in ('cpg', 'chg', 'chh') :
-                        files.extend([filebase + "_{}.bed.gz".format(x), filebase + "_{}.bed.tmp".format(x),
-                                      filebase + "_{}.bb".format(x)])
+                    for x in ('cpg', 'chg', 'chh'):
+                        files.extend([filebase + "_{}.bed.gz".format(x), filebase + "_{}.bed.gz.md5".format(x), 
+                                      filebase + "_{}.bb".format(x), filebase + "_{}.bb.md5".format(x)])
+                    if self.bw_strand_specific:
+                        for x in ('pos', 'neg'):
+                            files.extend([filebase + '_{}.bw'.format(x), filebase + '_{}.bw.md5'.format(x)])
+                    else:
+                        files.extend([filebase + '.bw', filebase + '.bw.md5'])
+                        
                 if self.snps and not(sm & 768):
                     snps = True
-                    files.extend([filebase + '_snps.txt.gz', filebase + '_snps.txt.gz_tbi'])
+                    files.extend([filebase + '_snps.txt.gz', filebase + '_snps.txt.gz_tbi', filebase + '_snps.txt.gz.md5'])
 
                 if self.dry_run or self.dry_run_json:
                     args = self.args
@@ -1460,15 +1544,17 @@ class MethylationFiltering(BasicPipeline):
                         if Mapping.gemBS_json != '.gemBS/gemBS.json':
                             com.extend(['-j',Mapping.gemBS_json])
                     com.extend(['extract','-b',sample])
-                    if args.strand_specific: com.append('-x')
+                    if args.strand_specific: com.append('-s')
+                    if args.bw_strand_specific: com.append('-W')
                     if args.phred: com.extend(['-q', args.phred])
                     if args.inform: com.extend(['-I', args.inform])
                     if args.min_nc: com.extend(['-M', args.min_nc])
                     if args.ref_bias: com.extend(['--reference-bias', args.ref_bias])
                     if args.allow_het: com.extend(['-H', args.allow_het])
+                    if args.extract_threads: com.extend(['-@', args.extract_threads])
                     if cpg: com.append('--cpg')
                     if non_cpg: com.append('--non-cpg')
-                    if bigWig: com.append('--bigwig')
+#                    if bigWig: com.append('--bigwig')
                     if bedMethyl: com.append('--bed-methyl')
                     if snps:
                         com.append('--snps')
@@ -1493,11 +1579,11 @@ class MethylationFiltering(BasicPipeline):
                     database.reg_db_com(filebase, "UPDATE extract SET status = 0 WHERE filepath = '{}'".format(filebase), files)                
 
                     #Call methylation extract
-                    ret = methylationFiltering(bcfFile=bcf_file,outbase=filebase,name=sample,strand_specific=self.strand_specific,
+                    ret = methylationFiltering(bcfFile=bcf_file,outbase=filebase,name=sample,strand_specific=self.strand_specific,bw_strand_specific=self.bw_strand_specific,
                                                cpg=cpg,non_cpg=non_cpg,contig_list=self.contig_list,allow_het=self.allow_het,
                                                inform=self.inform,phred=self.phred,min_nc=self.min_nc,bedMethyl=bedMethyl,
                                                bigWig=bigWig,contig_size_file=self.contig_size_file,ref_bias=self.ref_bias,
-                                               snps=snps,snp_list=self.snp_list,snp_db=self.snp_db)
+                                               snps=snps,snp_list=self.snp_list,snp_db=self.snp_db,extract_threads=self.extract_threads)
                     if ret:
                         logging.gemBS.gt("Results extraction for {} done, results located in: {}".format(bcf_file, ret))
 

@@ -4,7 +4,7 @@
 #define DEFAULT_PATH "/bin:/usr/bin:/usr/local/bin";
 #define READ 0
 #define WRITE 1
-
+/*
 #ifndef __unused__
 #if defined(__GNUC__)
 # define __unused__ __attribute__((unused))
@@ -12,7 +12,7 @@
 # define __unused__
 #endif
 #endif
-
+*/
 #define COMPRESS_GZIP 0
 #define COMPRESS_BZIP2 1
 #define COMPRESS_XZ 2
@@ -40,6 +40,7 @@ typedef struct {
     free(x);                                                                   \
   }
 
+tokens *tokenize(char *s, const int ch, tokens *tok);
 char *find_prog(const char *prog, const char *path);
 FILE *_open_readfile(const char *fname, bool *flag, bool chk_flag);
 int child_open_rw(int fd[2],const char *filterprog,char *const argv[]);
